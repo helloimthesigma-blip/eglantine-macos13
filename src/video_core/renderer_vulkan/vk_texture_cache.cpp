@@ -4061,15 +4061,63 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::NullImageV
         return;
     }
 
-    // Handle fallback for devices without nullDescriptor
-    ImageInfo info{};
-    info.format = PixelFormat::A8B8G8R8_UNORM;
-
-    null_image = MakeImage(*device, runtime.memory_allocator, info, {});
+    // Fallback for devices without nullDescriptor (MoltenVK): a 1x1 image per dimension, and a
+    // view of the texture type each binding declares. Metal faults the command buffer when a
+    // shader samples a texture whose type differs from the declared one (a texture2d bound where
+    // a texture2d_array is expected), which is what a single 2D view for every type gave.
+    using Shader::TextureType;
+    const auto make_image = [&](ImageType type, s32 layers) {
+        ImageInfo info{};
+        info.format = PixelFormat::A8B8G8R8_UNORM;
+        info.type = type;
+        info.resources.layers = layers;
+        return MakeImage(*device, runtime.memory_allocator, info, {});
+    };
+    // Six square layers make the 2D image cube compatible.
+    null_image = make_image(ImageType::e2D, 6);
+    null_image_1d = make_image(ImageType::e1D, 1);
+    null_image_3d = make_image(ImageType::e3D, 1);
     image_handle = *null_image;
-    for (u32 i = 0; i < Shader::NUM_TEXTURE_TYPES; i++) {
-        image_views[i] = MakeView(VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_IMAGE_ASPECT_COLOR_BIT);
-    }
+    const bool cubes = !device->HasBrokenCubeImageCompatibility();
+    const auto make_view = [&](VkImage image, VkImageViewType view_type, u32 layers) {
+        return device->GetLogical().CreateImageView({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = image,
+            .viewType = view_type,
+            .format = VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+            .components{
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = layers,
+            },
+        });
+    };
+    const auto set = [&](TextureType type, vk::ImageView view) {
+        image_views[static_cast<size_t>(type)] = std::move(view);
+    };
+    set(TextureType::Color1D, make_view(*null_image_1d, VK_IMAGE_VIEW_TYPE_1D, 1));
+    set(TextureType::ColorArray1D, make_view(*null_image_1d, VK_IMAGE_VIEW_TYPE_1D_ARRAY, 1));
+    set(TextureType::Color2D, make_view(*null_image, VK_IMAGE_VIEW_TYPE_2D, 1));
+    set(TextureType::ColorArray2D, make_view(*null_image, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 1));
+    set(TextureType::Color3D, make_view(*null_image_3d, VK_IMAGE_VIEW_TYPE_3D, 1));
+    set(TextureType::ColorCube,
+        cubes ? make_view(*null_image, VK_IMAGE_VIEW_TYPE_CUBE, 6)
+              : make_view(*null_image, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 6));
+    set(TextureType::ColorArrayCube,
+        cubes ? make_view(*null_image, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, 6)
+              : make_view(*null_image, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 6));
+    set(TextureType::Buffer, make_view(*null_image, VK_IMAGE_VIEW_TYPE_2D, 1));
+    set(TextureType::Color2DRect, make_view(*null_image, VK_IMAGE_VIEW_TYPE_2D, 1));
 }
 
 ImageView::~ImageView() = default;
@@ -4501,6 +4549,12 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
     runtime_ptr = &runtime;
     render_area.width = (std::min)(render_area.width, width);
     render_area.height = (std::min)(render_area.height, height);
+    // With no attachments the size is the guest's surface clip alone, which games set as large as
+    // 32768x32768. Past the device's limit (16384 on Metal) the render pass is invalid, and Metal
+    // loses the device when such a pass runs next to another.
+    const VkExtent2D max_extent = runtime.device.GetMaxFramebufferExtent();
+    render_area.width = (std::min)(render_area.width, max_extent.width);
+    render_area.height = (std::min)(render_area.height, max_extent.height);
 
     if (do_resolve_color) {
         const u32 layers = static_cast<u32>((std::max)(num_layers, 1));

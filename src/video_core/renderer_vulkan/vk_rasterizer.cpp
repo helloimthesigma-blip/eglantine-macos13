@@ -840,6 +840,24 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         if (std::find(skip_list.begin(), skip_list.end(), vs) != skip_list.end()) return;
     }
+    // EDEN_NX2_SKIP_NO_COLOR=1: drop draws with no colour target, =2 only those with no depth
+    // target either, =3 only depth-only ones (debug aid).
+    if (static const int skip_no_color = [] {
+            const char* value = std::getenv("EDEN_NX2_SKIP_NO_COLOR");
+            return value ? std::atoi(value) : 0;
+        }();
+        skip_no_color != 0) {
+        const auto& regs = maxwell3d->regs;
+        bool any_color = false;
+        for (size_t i = 0; i < Maxwell::NumRenderTargets; ++i) {
+            any_color |= regs.rt[i].format != Tegra::RenderTargetFormat::NONE;
+        }
+        const bool depth = regs.zeta_enable != 0;
+        if (!any_color && (skip_no_color == 1 || (skip_no_color == 2 && !depth) ||
+                           (skip_no_color == 3 && depth))) {
+            return;
+        }
+    }
     if (VideoCommon::Nx2Diag::Active()) {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;
         g_diag_draw = {is_indexed ? "indexed" : "draw",
@@ -862,6 +880,32 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             LOG_INFO(HW_GPU, "nx2 draw target {:#x} {}x{} format={:#x} vs={:#x} ps={:#x} blend={} (pairs so far {})",
                      rt.Address(), rt.width, rt.height, static_cast<u32>(rt.format), vs, ps,
                      regs.blend.enable[0], seen.size());
+        }
+    }
+    // EDEN_NX2_LOG_PROGRAMS: also log the first draw of each program pair to each target, with
+    // the state that decides how the host render pass is built.
+    if (static const bool trace = std::getenv("EDEN_NX2_LOG_PROGRAMS") != nullptr; trace) {
+        static std::set<std::tuple<GPUVAddr, u64, u64>> seen;
+        const auto& regs = maxwell3d->regs;
+        const auto& rt = regs.rt[0];
+        const auto& draw_state = maxwell3d->draw_manager.draw_state;
+        const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
+        const u64 ps = (u64{regs.pipelines[5].reserved[0] & 0xff} << 32) | regs.pipelines[5].reserved[1];
+        if (seen.size() < 4000 && seen.insert({rt.Address(), vs, ps}).second) {
+            LOG_INFO(HW_GPU,
+                     "nx2 draw vs={:#x} ps={:#x} rt0={:#x} {}x{} fmt={:#x} depth={} volume={} "
+                     "layer={} zeta={} {}x{}x{} topo={} indexed={} count={} inst={} vp0={}x{} "
+                     "clip={}x{} scissor0={} {}..{} {}..{}",
+                     vs, ps, rt.Address(), rt.width, rt.height, static_cast<u32>(rt.format),
+                     rt.depth.Value(), rt.volume.Value(), rt.base_layer, regs.zeta_enable,
+                     regs.zeta_size.width, regs.zeta_size.height, regs.zeta_size.depth.Value(),
+                     static_cast<u32>(draw_state.topology), is_indexed,
+                     is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count,
+                     instance_count, regs.viewport_transform[0].scale_x * 2.0f,
+                     regs.viewport_transform[0].scale_y * 2.0f, regs.surface_clip.width,
+                     regs.surface_clip.height, regs.scissor_test[0].enable,
+                     regs.scissor_test[0].min_x.Value(), regs.scissor_test[0].max_x.Value(),
+                     regs.scissor_test[0].min_y.Value(), regs.scissor_test[0].max_y.Value());
         }
     }
     PrepareDraw(is_indexed, [this, is_indexed, instance_count] {

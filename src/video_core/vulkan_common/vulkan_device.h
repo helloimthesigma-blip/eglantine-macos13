@@ -415,6 +415,12 @@ public:
         return properties.properties.limits.maxPushConstantsSize;
     }
 
+    /// Returns the largest framebuffer width and height the device allows.
+    VkExtent2D GetMaxFramebufferExtent() const {
+        const auto& limits = properties.properties.limits;
+        return {limits.maxFramebufferWidth, limits.maxFramebufferHeight};
+    }
+
 #define FN_MAX_LIMIT_LIST \
     FN_MAX_LIMIT_ELEM(ComputeSharedMemorySize) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorSampledImages) \
