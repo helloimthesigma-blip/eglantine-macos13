@@ -28,6 +28,13 @@ It's written in C++ with portability in mind, with builds for Windows, Linux and
   
 </p>
 
+> [!NOTE]
+> **This is `eglantine-macos13`, a fork of [Eglantine](https://github.com/Eglantine-Community/Eglantine)
+> that builds and runs on macOS 13 Ventura on Apple Silicon.** Upstream's macOS builds need macOS 15.
+> The `macos13` branch adds the build tooling and the Metal/MoltenVK fixes that were needed; see
+> [docs/macos13.md](docs/macos13.md) for building, what works, and known limitations.
+> No game files, keys or firmware are included or needed in this repository.
+
 <p align="center">
   <a href="#compatibility">Compatibility</a> |
   <a href="#development">Development</a> |
