@@ -6,6 +6,13 @@
 
 #include <string>
 
+#ifdef __APPLE__
+#include <climits>
+#include <filesystem>
+#include <vector>
+#include <mach-o/dyld.h>
+#endif
+
 #include "common/dynamic_library.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
@@ -22,15 +29,27 @@ std::shared_ptr<Common::DynamicLibrary> OpenLibrary(
 #else
     auto library = std::make_shared<Common::DynamicLibrary>();
 #ifdef __APPLE__
-    const auto libvulkan_filename =
-        Common::FS::GetBundleDirectory() / "Contents/Frameworks/libvulkan.1.dylib";
-    const auto libmoltenvk_filename =
-        Common::FS::GetBundleDirectory() / "Contents/Frameworks/libMoltenVK.dylib";
-    const char* library_paths[] = {std::getenv("LIBVULKAN_PATH"), libvulkan_filename.c_str(),
-                                   libmoltenvk_filename.c_str()};
-    // Check if a path to a specific Vulkan library has been specified.
-    for (const auto& library_path : library_paths) {
-        if (library_path && library->Open(library_path)) {
+    std::vector<std::filesystem::path> candidates;
+    if (const char* env_path = std::getenv("LIBVULKAN_PATH")) {
+        candidates.emplace_back(env_path);
+    }
+    const auto bundle = Common::FS::GetBundleDirectory();
+    candidates.push_back(bundle / "Contents/Frameworks/libvulkan.1.dylib");
+    candidates.push_back(bundle / "Contents/Frameworks/libMoltenVK.dylib");
+    // eden-cli is not a bundle: look beside it, in an app bundle it sits in, and in the
+    // eglantine.app next to it.
+    char exe_path[PATH_MAX];
+    u32 exe_path_size = sizeof(exe_path);
+    if (_NSGetExecutablePath(exe_path, &exe_path_size) == 0) {
+        std::error_code ec;
+        auto exe_dir = std::filesystem::weakly_canonical(exe_path, ec).parent_path();
+        candidates.push_back(exe_dir / "libMoltenVK.dylib");
+        candidates.push_back(exe_dir / "../Frameworks/libMoltenVK.dylib");
+        candidates.push_back(exe_dir / "eglantine.app/Contents/Frameworks/libMoltenVK.dylib");
+    }
+    for (const auto& path : candidates) {
+        if (library->Open(path.c_str())) {
+            LOG_INFO(Render_Vulkan, "Vulkan library: {}", path.string());
             break;
         }
     }
