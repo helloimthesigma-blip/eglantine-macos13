@@ -553,6 +553,13 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
         reject_list.find(fmt::format(",{:x},", program_base)) != std::string::npos) {
         throw Shader::RuntimeError("Native shader at {:#x} rejected by EDEN_NX2_REJECT", program_base);
     }
+    // EDEN_NX2_LOG_PROGRAMS=1: log each program as it is lowered (the address EDEN_NX2_REJECT
+    // takes), so a crash right after new programs appear can be bisected.
+    if (static const bool log_programs = std::getenv("EDEN_NX2_LOG_PROGRAMS") != nullptr;
+        log_programs) {
+        LOG_INFO(HW_GPU, "Native program {:x} key {:016x} stage {}", program_base,
+                 Shader::Ampere::NativeProgramKey(native), static_cast<int>(ShaderStage()));
+    }
     if (VideoCommon::Nx2Diag::Active()) {
         VideoCommon::Nx2Diag::Diagnostics::Get().RegisterProgram(
             program_base, Shader::Ampere::NativeProgramKey(native));

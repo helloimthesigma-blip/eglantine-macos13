@@ -1056,8 +1056,13 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         for (size_t i = 0; i < mask_table.size(); ++i) {
             write_mask |= mask[i] ? mask_table[i] : 0;
         }
+        // Vulkan ignores blending on integer attachments; Metal (MoltenVK) faults the command
+        // buffer instead, so leave it off there.
+        const PixelFormat format{DecodeFormat(key.state.color_formats[index])};
+        const bool integer_target = format != PixelFormat::Invalid &&
+                                    VideoCore::Surface::IsPixelFormatInteger(format);
         cb_attachments.push_back({
-            .blendEnable = blend.enable != 0,
+            .blendEnable = blend.enable != 0 && !integer_target,
             .srcColorBlendFactor = MaxwellToVK::BlendFactor(blend.SourceRGBFactor()),
             .dstColorBlendFactor = MaxwellToVK::BlendFactor(blend.DestRGBFactor()),
             .colorBlendOp = MaxwellToVK::BlendEquation(blend.EquationRGB()),

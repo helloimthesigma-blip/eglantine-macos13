@@ -40,6 +40,8 @@ constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 128_MiB;
 constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 128_MiB;
 #endif
 
+constexpr VkDeviceSize STREAM_BUFFER_TAIL_PADDING = 64_KiB;
+
 size_t GetStreamBufferSize(const Device& device) {
     if (!device.HasDebuggingToolAttached()) {
         if (device.IsIntegrated()) {
@@ -88,7 +90,10 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = stream_buffer_size,
+        // Shaders declare constant buffers as full 64 KiB arrays. Metal checks a binding against
+        // the end of the buffer, not the bound range, and faults the command buffer when a
+        // uniform bound near the end of the ring could read past it: pad the allocation.
+        .size = stream_buffer_size + STREAM_BUFFER_TAIL_PADDING,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,

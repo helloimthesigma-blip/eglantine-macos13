@@ -50,29 +50,38 @@ if [ ! -f "$ffmpeg_dir/lib/libdav1d.a" ]; then
     "$root/tools/macos13/build-ffmpeg-av1.sh" "$ffmpeg_dir"
 fi
 
-cmake -S "$root" -B "$build" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_COMPILER="$llvm/bin/clang" \
-    -DCMAKE_CXX_COMPILER="$llvm/bin/clang++" \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
-    -DCMAKE_OSX_SYSROOT="$sdk" \
-    -DCMAKE_OSX_ARCHITECTURES=arm64 \
-    -DCMAKE_EXE_LINKER_FLAGS="$exe_link" \
-    -DCMAKE_SHARED_LINKER_FLAGS="$libcxx_link" \
-    -DCMAKE_MODULE_LINKER_FLAGS="$libcxx_link" \
-    -DBUILD_TESTING=OFF \
-    -DYUZU_TESTS=OFF \
-    -DYUZU_CMD=ON \
-    -DYUZU_ROOM=OFF \
-    -DYUZU_ROOM_STANDALONE=OFF \
-    -DYUZU_USE_BUNDLED_QT=ON \
-    -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
-    -DVulkanHeaders_FORCE_BUNDLED=ON \
-    -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
-    -DENABLE_UPDATE_CHECKER=OFF \
-    -DUSE_DISCORD_PRESENCE=OFF \
-    -DENABLE_WEB_SERVICE=OFF \
-    -DFFmpeg_CUSTOM_DIR="$ffmpeg_dir" \
+configure_args=(
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_C_COMPILER="$llvm/bin/clang"
+    -DCMAKE_CXX_COMPILER="$llvm/bin/clang++"
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+    -DCMAKE_OSX_SYSROOT="$sdk"
+    -DCMAKE_OSX_ARCHITECTURES=arm64
+    -DCMAKE_EXE_LINKER_FLAGS="$exe_link"
+    -DCMAKE_SHARED_LINKER_FLAGS="$libcxx_link"
+    -DCMAKE_MODULE_LINKER_FLAGS="$libcxx_link"
+    -DBUILD_TESTING=OFF
+    -DYUZU_TESTS=OFF
+    -DYUZU_CMD=ON
+    -DYUZU_ROOM=OFF
+    -DYUZU_ROOM_STANDALONE=OFF
+    -DYUZU_USE_BUNDLED_QT=ON
+    -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+    -DVulkanHeaders_FORCE_BUNDLED=ON
+    -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+    -DENABLE_UPDATE_CHECKER=OFF
+    -DUSE_DISCORD_PRESENCE=OFF
+    -DENABLE_WEB_SERVICE=OFF
+    -DFFmpeg_CUSTOM_DIR="$ffmpeg_dir"
     "$@"
+)
+
+# Configure only when the arguments changed: a configure re-extracts some bundled sources and
+# rebuilds them. CMake itself reconfigures when a CMakeLists.txt changes.
+stamp="$build/.macos13-configure-args"
+if [ ! -f "$build/build.ninja" ] || [ "$(cat "$stamp" 2>/dev/null)" != "${configure_args[*]}" ]; then
+    cmake -S "$root" -B "$build" -G Ninja "${configure_args[@]}"
+    printf '%s' "${configure_args[*]}" > "$stamp"
+fi
 
 cmake --build "$build" --target yuzu yuzu-cmd --parallel "$jobs"
