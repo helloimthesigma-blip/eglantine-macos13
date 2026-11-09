@@ -12,6 +12,9 @@
 #include <utility>
 
 #include <fmt/format.h>
+#include <map>
+#include <mutex>
+#include <mach-o/dyld.h>
 
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 
@@ -49,6 +52,9 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     : device{device_}, state_tracker{state_tracker_},
       master_semaphore{std::make_unique<MasterSemaphore>(device)},
       command_pool{std::make_unique<CommandPool>(*master_semaphore, device)} {
+    if (GpuTiming::Enabled()) {
+        gpu_timing = std::make_unique<GpuTiming>(device);
+    }
 
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
@@ -187,8 +193,13 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
         values[i] = clear_values[i];
     }
     const bool after_compute = std::exchange(compute_writes_pending, false);
+    timed_draws = 0;
+    timed_vs = 0;
+    timed_ps = 0;
+    // A cleared attachment is written by the load operation (deferred clears).
+    depth_stencil_written = clear_value_count != 0;
     Record([renderpass, framebuffer_handle, render_area, values, clear_value_count,
-            after_compute](vk::CommandBuffer cmdbuf) {
+            after_compute, timing = gpu_timing.get()](vk::CommandBuffer cmdbuf) {
         const VkRenderPassBeginInfo renderpass_bi{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = nullptr,
@@ -213,6 +224,9 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
             };
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                    VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, COMPUTE_TO_GRAPHICS);
+        }
+        if (timing) {
+            timing->Begin(cmdbuf);
         }
         cmdbuf.BeginRenderPass(renderpass_bi, VK_SUBPASS_CONTENTS_INLINE);
     });
@@ -301,12 +315,68 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
         render_area.height == state.render_area.height) {
         return;
     }
+    if (gpu_timing && state.renderpass) {
+        // EDEN_NX2_GPU_TIMING: how the next pass differs from the one it ends.
+        static std::mutex mutex;
+        static std::map<std::string, u64> reasons;
+        static auto last = std::chrono::steady_clock::now();
+        const auto new_images = framebuffer->Images();
+        const u32 new_count = framebuffer->NumImages();
+        u32 shared = 0;
+        for (u32 i = 0; i < new_count; ++i) {
+            for (u32 j = 0; j < num_renderpass_images; ++j) {
+                shared += new_images[i] == renderpass_images[j] ? 1 : 0;
+            }
+        }
+        const std::string reason = fmt::format(
+            "{}x{} images {} -> {}x{} images {}, shared {}, same pass {}", state.render_area.width,
+            state.render_area.height, num_renderpass_images, render_area.width, render_area.height,
+            new_count, shared, renderpass == state.renderpass);
+        std::scoped_lock lock{mutex};
+        ++reasons[reason];
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last >= std::chrono::seconds{10}) {
+            const double seconds = std::chrono::duration<double>(now - last).count();
+            last = now;
+            std::vector<std::pair<std::string, u64>> sorted(reasons.begin(), reasons.end());
+            std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
+            std::string text = "Render pass switches per second:";
+            for (size_t i = 0; i < (std::min)(sorted.size(), size_t{15}); ++i) {
+                text += fmt::format("\n  {:7.1f}/s  {}", sorted[i].second / seconds, sorted[i].first);
+            }
+            LOG_INFO(Render_Vulkan, "{}", text);
+            reasons.clear();
+        }
+    }
     // Ends any active pass and realizes a deferred clear
     EndRenderPass();
     BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext() {
+    if (gpu_timing && state.renderpass) {
+        // EDEN_NX2_GPU_TIMING: the call sites that end render passes, for atos.
+        static std::mutex mutex;
+        static std::map<void*, u64> sites;
+        static auto last = std::chrono::steady_clock::now();
+        std::scoped_lock lock{mutex};
+        ++sites[__builtin_return_address(0)];
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last >= std::chrono::seconds{10}) {
+            const double seconds = std::chrono::duration<double>(now - last).count();
+            last = now;
+            std::vector<std::pair<void*, u64>> sorted(sites.begin(), sites.end());
+            std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
+            std::string text = fmt::format("Outside render pass requests per second (slide {:#x}):",
+                                           static_cast<uintptr_t>(_dyld_get_image_vmaddr_slide(0)));
+            for (size_t i = 0; i < (std::min)(sorted.size(), size_t{15}); ++i) {
+                text += fmt::format("\n  {:7.1f}/s {:#x}", sorted[i].second / seconds,
+                                    reinterpret_cast<uintptr_t>(sorted[i].first));
+            }
+            LOG_INFO(Render_Vulkan, "{}", text);
+            sites.clear();
+        }
+    }
     EndRenderPass();
 }
 
@@ -444,6 +514,9 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
         };
         upload_cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, WRITE_BARRIER);
+        if (gpu_timing) {
+            gpu_timing->OnSubmit(signal_value, *master_semaphore);
+        }
         upload_cmdbuf.End();
         cmdbuf.End();
 
@@ -511,10 +584,17 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
+        std::string timing_label;
+        if (gpu_timing) {
+            timing_label = fmt::format("RP {}x{} images {} draws {:<4} vs {:016x} ps {:016x}",
+                                       state.render_area.width, state.render_area.height,
+                                       num_renderpass_images, timed_draws, timed_vs, timed_ps);
+        }
         Record([num_images = num_renderpass_images,
                        images = renderpass_images,
                        ranges = renderpass_image_ranges,
-                       has_transform_feedback = device.IsExtTransformFeedbackSupported()](
+                       has_transform_feedback = device.IsExtTransformFeedbackSupported(),
+                       timing = gpu_timing.get(), timing_label = std::move(timing_label)](
                           vk::CommandBuffer cmdbuf) {
             std::array<VkImageMemoryBarrier, 9> barriers;
             for (size_t i = 0; i < num_images; ++i) {
@@ -552,6 +632,9 @@ void Scheduler::EndRenderPass()
                 };
             }
             cmdbuf.EndRenderPass();
+            if (timing) {
+                timing->End(cmdbuf, std::string{timing_label});
+            }
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
                                    0, nullptr, nullptr, vk::Span(barriers.data(), num_images));

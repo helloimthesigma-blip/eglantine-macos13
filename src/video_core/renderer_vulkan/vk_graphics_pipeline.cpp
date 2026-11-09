@@ -31,6 +31,7 @@
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/nx2_profile.h"
 
@@ -673,7 +674,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
     }
 
-    if (regs.transform_feedback_enabled != 0) {
+    // Transform feedback starts outside a render pass; without the extension it is ignored
+    // (HandleTransformFeedback), and ending the pass for it would only cost a reload of the
+    // attachments (MoltenVK: ~90 times per Ocarina of Time frame).
+    if (regs.transform_feedback_enabled != 0 && device.IsExtTransformFeedbackSupported()) {
         scheduler.RequestOutsideRenderPassOperationContext();
     }
 
@@ -812,11 +816,20 @@ bool GraphicsPipeline::ConfigureMeshEmulationDraw(const RescalingPushConstant& r
         }
     };
     scheduler.Record([this, descriptor_data, groups = mesh_emu_groups, push_constants,
-                      bind_sets](vk::CommandBuffer cmdbuf) {
+                      bind_sets, timing = scheduler.Timing()](vk::CommandBuffer cmdbuf) {
         mesh_emu_set = VK_NULL_HANDLE;
         if (!pipeline || !mesh_emu_mesh_pipeline) {
             return;
         }
+        if (timing) {
+            timing->Begin(cmdbuf);
+        }
+        SCOPE_EXIT {
+            if (timing) {
+                timing->End(cmdbuf, fmt::format("MESH-EMU {:016x} groups {}", key.unique_hashes[1],
+                                                groups));
+            }
+        };
         if (descriptor_set_layout) {
             mesh_emu_set = descriptor_allocator.Commit();
             device.GetLogical().UpdateDescriptorSet(mesh_emu_set, *descriptor_update_template,

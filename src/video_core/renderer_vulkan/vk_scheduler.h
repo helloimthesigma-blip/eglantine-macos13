@@ -20,6 +20,7 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
+#include "video_core/renderer_vulkan/vk_gpu_timing.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -91,6 +92,33 @@ public:
     void RequestOutsideRenderPassOperationContext();
 
     /// A dispatch was recorded: the next render pass must see what it wrote.
+    /// EDEN_NX2_GPU_TIMING (vk_gpu_timing.h), or null; used on the worker thread.
+    [[nodiscard]] GpuTiming* Timing() const noexcept {
+        return gpu_timing.get();
+    }
+
+    /// A draw in the current render pass, for its GPU timing label.
+    void NoteTimedDraw(u64 vs, u64 ps) noexcept {
+        if (!gpu_timing) {
+            return;
+        }
+        if (timed_draws++ == 0) {
+            timed_vs = vs;
+            timed_ps = ps;
+        }
+    }
+
+    /// A draw or clear in the current render pass wrote its depth or stencil attachment.
+    void NoteDepthStencilWrite() noexcept {
+        depth_stencil_written = true;
+    }
+
+    /// Whether the current render pass wrote depth or stencil (sampling the attachment then needs
+    /// the pass ended first; otherwise memory already holds what the pass would store).
+    [[nodiscard]] bool DepthStencilWrittenInPass() const noexcept {
+        return depth_stencil_written;
+    }
+
     void NoteComputeWrites() {
         compute_writes_pending = true;
     }
@@ -353,6 +381,11 @@ private:
     StateTracker& state_tracker;
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
+    std::unique_ptr<GpuTiming> gpu_timing;
+    bool depth_stencil_written{};
+    u32 timed_draws{};
+    u64 timed_vs{};
+    u64 timed_ps{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;

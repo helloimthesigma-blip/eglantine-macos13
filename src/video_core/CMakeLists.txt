@@ -195,6 +195,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_multi_range_buffer.cpp
     renderer_vulkan/vk_multi_range_buffer.h
     renderer_vulkan/vk_master_semaphore.cpp
+    renderer_vulkan/vk_gpu_timing.cpp
+    renderer_vulkan/vk_gpu_timing.h
     renderer_vulkan/vk_mesh_emulation.cpp
     renderer_vulkan/vk_mesh_emulation.h
     renderer_vulkan/vk_master_semaphore.h

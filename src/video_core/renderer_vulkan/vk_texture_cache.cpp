@@ -1403,7 +1403,13 @@ void TextureCacheRuntime::EraseResolveShadow(VkImage msaa_image) {
 }
 
 void TextureCacheRuntime::BarrierFeedbackLoop() {
-    scheduler.RequestOutsideRenderPassOperationContext();
+    // A draw samples the depth attachment it is bound with. Ending the pass stores what earlier
+    // draws in it wrote; if none wrote depth or stencil, memory already matches the attachment
+    // and the pass goes on. Games do this for most transparent draws (Ocarina of Time: ~95 per
+    // frame), and each needless end reloads every attachment on tile-based GPUs.
+    if (scheduler.DepthStencilWrittenInPass()) {
+        scheduler.RequestOutsideRenderPassOperationContext();
+    }
 }
 
 void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,

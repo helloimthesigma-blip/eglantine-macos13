@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <iterator>
 #include <fstream>
@@ -36,6 +37,7 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/perf_stats.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
@@ -711,9 +713,29 @@ static void RunKeyScript(InputCommon::InputSubsystem& input_subsystem, Core::Sys
     RunLiveKeys(input_subsystem, system);
 }
 
+// EDEN_NX2_LOG_FPS=1: logs the game's frame rate and frame time every 5 s (for comparing builds
+// and settings in unattended runs).
+static void LogFrameRate(Core::System& system) {
+    static const bool enabled{std::getenv("EDEN_NX2_LOG_FPS") != nullptr};
+    if (!enabled || !system.IsPoweredOn()) {
+        return;
+    }
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds{5}) {
+        return;
+    }
+    last = now;
+    const auto results = system.GetAndResetPerfStats();
+    LOG_INFO(Frontend, "Frame rate: game {:.1f} fps, frame {:.1f} ms, speed {:.0f}%",
+             results.average_game_fps, results.frametime * 1000.0,
+             results.emulation_speed * 100.0);
+}
+
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     SdlState *state = (SdlState *)appstate;
     RunKeyScript(state->input_subsystem, state->system);
+    LogFrameRate(state->system);
     if (state->emu_window) {
         state->emu_window->ApplyPendingTitle();
     }

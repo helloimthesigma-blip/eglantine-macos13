@@ -395,6 +395,11 @@ public:
         return properties.properties.limits.minUniformBufferOffsetAlignment;
     }
 
+    /// Nanoseconds per timestamp query tick.
+    float GetTimestampPeriod() const {
+        return properties.properties.limits.timestampPeriod;
+    }
+
     /// Returns storage alignment requirement.
     VkDeviceSize GetStorageBufferAlignment() const {
         return properties.properties.limits.minStorageBufferOffsetAlignment;

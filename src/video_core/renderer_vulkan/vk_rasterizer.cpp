@@ -554,6 +554,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         report_failure("configure failed");
         return;
     }
+    scheduler.NoteTimedDraw(pipeline->ShaderHashes()[1], pipeline->ShaderHashes()[5]);
     mesh_emulation_draw.reset();
     if (mesh_draw && pipeline->IsMeshEmulated()) {
         mesh_emulation_draw = pipeline->GetMeshEmulationDraw();
@@ -603,6 +604,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
         draw_func();
+    }
+    {
+        const auto& regs = maxwell3d->regs;
+        if ((regs.depth_write_enabled != 0 && regs.zeta_enable != 0) || regs.stencil_enable != 0) {
+            scheduler.NoteDepthStencilWrite();
+        }
     }
     if (diag_query >= 0) {
         scheduler.Record([pool = **g_diag_pool, diag_query](vk::CommandBuffer cmdbuf) {
@@ -1288,6 +1295,8 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     if (aspect_flags == 0) {
         return;
     }
+    // Inside the pass or as its load operation, either way not yet in memory (BarrierFeedbackLoop).
+    scheduler.NoteDepthStencilWrite();
 
     if (use_stencil && framebuffer->HasAspectStencilBit() && regs.stencil_front_mask != 0xFF &&
         regs.stencil_front_mask != 0) {
@@ -1437,11 +1446,20 @@ void RasterizerVulkan::DispatchCompute() {
             record_read_barrier();
         }
         scheduler.Record([pipeline, indirect_buffer = buffer->Handle(),
-                          indirect_offset = offset](vk::CommandBuffer cmdbuf) {
+                          indirect_offset = offset, timing = scheduler.Timing(),
+                          label = scheduler.Timing()
+                                      ? fmt::format("CS {:016x} indirect", pipeline->ShaderHash())
+                                      : std::string{}](vk::CommandBuffer cmdbuf) {
             if (!pipeline->IsBound()) {
                 return;
             }
+            if (timing) {
+                timing->Begin(cmdbuf);
+            }
             cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
+            if (timing) {
+                timing->End(cmdbuf, std::string{label});
+            }
         });
         SubmitNx2ListCopies();
         publish_collision_map();
@@ -1454,11 +1472,21 @@ void RasterizerVulkan::DispatchCompute() {
     }
     scheduler.RequestOutsideRenderPassOperationContext();
     record_read_barrier();
-    scheduler.Record([pipeline, dim](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([pipeline, dim, timing = scheduler.Timing(),
+                      label = scheduler.Timing()
+                                  ? fmt::format("CS {:016x} grid {}x{}x{}", pipeline->ShaderHash(),
+                                                dim[0], dim[1], dim[2])
+                                  : std::string{}](vk::CommandBuffer cmdbuf) {
         if (!pipeline->IsBound()) {
             return;
         }
+        if (timing) {
+            timing->Begin(cmdbuf);
+        }
         cmdbuf.Dispatch(dim[0], dim[1], dim[2]);
+        if (timing) {
+            timing->End(cmdbuf, std::string{label});
+        }
     });
     SubmitNx2ListCopies();
     publish_collision_map();
