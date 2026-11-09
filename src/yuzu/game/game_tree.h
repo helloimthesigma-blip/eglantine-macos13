@@ -27,6 +27,9 @@ public:
     /// Ryujinx-style cards: one full-width column drawn by the delegate, no header.
     void ApplyCardStyle(QAbstractItemDelegate* delegate);
 
+    /// Card style: games only (folders expanded, favourites and "add directory" rows hidden).
+    void RefreshCardRows();
+
 signals:
     void ItemExpandedChanged(const QModelIndex& item);
     void FilterResultReady(int visible, int total);

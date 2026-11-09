@@ -70,12 +70,31 @@ void GameTree::ApplyCardStyle(QAbstractItemDelegate* delegate) {
     setItemDelegateForColumn(0, delegate);
     setHeaderHidden(true);
     setAlternatingRowColors(false);
+    setStyleSheet(QStringLiteral("QTreeView{ border: none; padding-top: 7px; }"));
     setMouseTracking(true);
-    setIndentation(14);
+    setIndentation(0);
+    setRootIsDecorated(false);
     setUniformRowHeights(false);
     header()->setStretchLastSection(false);
     header()->setSectionResizeMode(0, QHeaderView::Stretch);
     UpdateColumnVisibility(qobject_cast<GameListModel*>(model()));
+    RefreshCardRows();
+}
+
+void GameTree::RefreshCardRows() {
+    if (!card_style || model() == nullptr) {
+        return;
+    }
+    const QModelIndex root = rootIndex();
+    for (int row = 0; row < model()->rowCount(root); ++row) {
+        const QModelIndex index = model()->index(row, 0, root);
+        const auto type = index.data(GameListItem::TypeRole).value<GameListItemType>();
+        const bool hide = type == GameListItemType::Favorites || type == GameListItemType::AddDir;
+        setRowHidden(row, root, hide);
+        if (!hide) {
+            expand(index);
+        }
+    }
     doItemsLayout();
 }
 
@@ -121,7 +140,7 @@ QString GameTree::GetLastFilterResultItem() const {
 int GameTree::FilterClosedResultCount(GameListModel* model) {
     int children_total = 0;
 
-    auto hide_favorites_row = UISettings::values.favorited_ids.size() == 0;
+    auto hide_favorites_row = card_style || UISettings::values.favorited_ids.size() == 0;
     setRowHidden(0, model->invisibleRootItem()->index(), hide_favorites_row);
 
     for (int i = 1; i < model->rowCount() - 1; ++i) {

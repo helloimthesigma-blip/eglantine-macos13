@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <fstream>
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -28,6 +30,20 @@ struct PlayTimeElement {
 std::optional<std::filesystem::path> GetCurrentUserPlayTimePath() {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::PlayTimeDir) /
            "playtime.bin";
+}
+
+// "last_played.txt": one "<program id hex> <unix seconds>" line per program.
+std::filesystem::path GetLastPlayedPath() {
+    return Common::FS::GetEdenPath(Common::FS::EdenPath::PlayTimeDir) / "last_played.txt";
+}
+
+void ReadLastPlayedFile(std::map<u64, s64>& out) {
+    std::ifstream file{GetLastPlayedPath()};
+    u64 program_id{};
+    s64 seconds{};
+    while (file >> std::hex >> program_id >> std::dec >> seconds) {
+        out[program_id] = seconds;
+    }
 }
 
 [[nodiscard]] bool ReadPlayTimeFile(PlayTimeDatabase& out_play_time_db) {
@@ -100,6 +116,23 @@ PlayTimeManager::PlayTimeManager() : running_program_id() {
     if (!ReadPlayTimeFile(database)) {
         LOG_ERROR(Frontend, "Failed to read play time database! Resetting to default.");
     }
+    ReadLastPlayedFile(last_played);
+    // Programs played before this was recorded: the play time file was last written then.
+    std::error_code ec;
+    if (const auto path = GetCurrentUserPlayTimePath()) {
+        const auto written = std::filesystem::last_write_time(*path, ec);
+        if (!ec) {
+            const auto system_time = std::filesystem::file_time_type::clock::to_sys(written);
+            const s64 seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                    system_time.time_since_epoch())
+                                    .count();
+            for (const auto& [program_id, play_time] : database) {
+                if (play_time > 0 && !last_played.contains(program_id)) {
+                    last_played[program_id] = seconds;
+                }
+            }
+        }
+    }
 }
 
 PlayTimeManager::~PlayTimeManager() {
@@ -111,6 +144,10 @@ void PlayTimeManager::SetProgramId(u64 program_id) {
 }
 
 void PlayTimeManager::Start() {
+    last_played[running_program_id] = std::chrono::duration_cast<std::chrono::seconds>(
+                                           std::chrono::system_clock::now().time_since_epoch())
+                                           .count();
+    SaveLastPlayed();
     play_time_thread = std::jthread([&](std::stop_token stop_token) { AutoTimestamp(stop_token); });
 }
 
@@ -145,6 +182,20 @@ void PlayTimeManager::Save() {
     if (!WritePlayTimeFile(database)) {
         LOG_ERROR(Frontend, "Failed to update play time database!");
     }
+}
+
+void PlayTimeManager::SaveLastPlayed() {
+    std::ofstream file{GetLastPlayedPath(), std::ios::trunc};
+    for (const auto& [program_id, seconds] : last_played) {
+        if (program_id != 0) {
+            file << std::hex << program_id << ' ' << std::dec << seconds << '\n';
+        }
+    }
+}
+
+s64 PlayTimeManager::GetLastPlayed(u64 program_id) const {
+    const auto it = last_played.find(program_id);
+    return it != last_played.end() ? it->second : 0;
 }
 
 u64 PlayTimeManager::GetPlayTime(u64 program_id) const {

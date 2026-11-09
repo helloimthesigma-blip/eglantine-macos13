@@ -9,6 +9,10 @@
 #include "common/common_types.h"
 #include "common/settings_enums.h"
 
+namespace PlayTime {
+class PlayTimeManager;
+}
+
 class QComboBox;
 class QLineEdit;
 class QSlider;
@@ -53,7 +57,16 @@ public:
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override;
+
+    /// For the last played and time played columns.
+    static void SetPlayTimeManager(const PlayTime::PlayTimeManager* manager);
+
+private:
+    static const PlayTime::PlayTimeManager* play_time_manager;
 };
+
+/// "1 hour", "30 minutes": the largest unit, as Ryujinx's FormatTimeSpan.
+[[nodiscard]] QString FormatRyujinxPlayTime(u64 seconds);
 
 /// Whether the Ryujinx-style interface is selected (UISettings theme "ryujinx").
 [[nodiscard]] bool IsRyujinxInterface();

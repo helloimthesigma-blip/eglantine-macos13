@@ -59,6 +59,7 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
         ryujinx_toolbar = new RyujinxToolbar(this);
         layout->addWidget(ryujinx_toolbar);
         card_delegate = new RyujinxCardDelegate(this);
+        RyujinxCardDelegate::SetPlayTimeManager(&play_time_manager);
     }
 
     SetupViews();
@@ -331,6 +332,10 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
                 }
             }
         }
+    }
+
+    if (card_delegate) {
+        tree_view->RefreshCardRows();
     }
 
     // Watcher updates

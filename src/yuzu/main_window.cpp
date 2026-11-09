@@ -1636,8 +1636,26 @@ void MainWindow::ConnectMenuEvents() {
     {
         auto* controls_action = new QAction(tr("Controls..."), this);
         controls_action->setMenuRole(QAction::NoRole);
-        ui->menu_Emulation->insertAction(ui->action_Configure_Current_Game, controls_action);
         connect(controls_action, &QAction::triggered, this, &MainWindow::OnConfigureControls);
+        if (IsRyujinxInterface()) {
+            // Ryujinx's menus (MainMenuBarView.axaml): File, Options (settings), Actions
+            // (emulation, tools), View, Help.
+            auto* options = new QMenu(tr("&Options"), this);
+            ui->menu_Emulation->removeAction(ui->action_Configure);
+            ui->action_Configure->setMenuRole(QAction::NoRole);
+            ui->action_Configure->setText(tr("Settings..."));
+            options->addAction(ui->action_Configure);
+            options->addAction(controls_action);
+            menuBar()->insertMenu(ui->menu_Emulation->menuAction(), options);
+            ui->menu_Emulation->setTitle(tr("&Actions"));
+            menuBar()->removeAction(ui->menu_Tools->menuAction());
+            menuBar()->removeAction(ui->menu_Multiplayer->menuAction());
+            ui->menu_Emulation->addSeparator();
+            ui->menu_Emulation->addMenu(ui->menu_Tools);
+            ui->menu_Emulation->addMenu(ui->menu_Multiplayer);
+        } else {
+            ui->menu_Emulation->insertAction(ui->action_Configure_Current_Game, controls_action);
+        }
     }
     connect_menu(ui->action_Tree_View, &MainWindow::SetTreeView);
     connect_menu(ui->action_Carousel_View, &MainWindow::SetCarouselView);
@@ -2458,6 +2476,7 @@ void MainWindow::OnEmulationStopped() {
     status_bar_update_timer.stop();
     shader_building_label->setVisible(false);
     res_scale_label->setVisible(false);
+    UpdateRyujinxStatusBar(false);
     emu_speed_label->setVisible(false);
     game_fps_label->setVisible(false);
     emu_frametime_label->setVisible(false);
@@ -3288,6 +3307,7 @@ void MainWindow::OnMenuRecentFile() {
 }
 
 void MainWindow::OnStartGame() {
+    UpdateRyujinxStatusBar(true);
     PreventOSSleep();
 
     QtCommon::emu_thread->SetRunning(true);
@@ -3745,8 +3765,10 @@ void MainWindow::SetupRyujinxInterface() {
     games_label = new QLabel();
     games_label->setContentsMargins(4, 0, 4, 0);
     statusBar()->insertPermanentWidget(1, games_label);
+    UpdateRyujinxStatusBar(false);
     connect(game_list, &GameList::PopulatingCompleted, this, [this] {
         int games = 0;
+        u64 total_play_time = 0;
         const QStandardItemModel* model = game_list->GetModel();
         for (int row = 0; row < model->rowCount(); ++row) {
             const QStandardItem* folder = model->item(row, 0);
@@ -3756,15 +3778,34 @@ void MainWindow::SetupRyujinxInterface() {
                 continue;
             }
             for (int child = 0; child < folder->rowCount(); ++child) {
-                games += folder->child(child, 0)->data(GameListItem::TypeRole)
-                                 .value<GameListItemType>() == GameListItemType::Game;
+                const QStandardItem* item = folder->child(child, 0);
+                if (item->data(GameListItem::TypeRole).value<GameListItemType>() !=
+                    GameListItemType::Game) {
+                    continue;
+                }
+                ++games;
+                total_play_time += play_time_manager->GetPlayTime(
+                    item->data(GameListItemPath::ProgramIdRole).toULongLong());
             }
         }
-        games_label->setText(tr("%n Game(s) Loaded", "", games));
+        const QString play_time = FormatRyujinxPlayTime(total_play_time);
+        games_label->setText(tr("%1/%1 Games Loaded  |  Total Play Time: %2").arg(games).arg(play_time));
         games_label->setMinimumWidth(games_label->fontMetrics().horizontalAdvance(
                                          games_label->text()) +
                                      16);
     });
+}
+
+void MainWindow::UpdateRyujinxStatusBar(bool running) {
+    if (!IsRyujinxInterface()) {
+        return;
+    }
+    // Ryujinx shows the game count while idle, and docked mode and volume in game.
+    if (games_label) {
+        games_label->setVisible(!running);
+    }
+    dock_status_button->setVisible(running);
+    volume_button->setVisible(running);
 }
 
 void MainWindow::OnConfigureControls() {

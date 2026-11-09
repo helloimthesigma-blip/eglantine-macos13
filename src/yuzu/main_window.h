@@ -633,6 +633,7 @@ protected:
     // Ryujinx-style interface (UISettings theme "ryujinx"): the controls shortcut on the status bar, the
     // game count shown while no game runs, and whether settings open on the Controls tab.
     void SetupRyujinxInterface();
+    void UpdateRyujinxStatusBar(bool running);
     void SnapshotControls(const QString& path);
     QPushButton* controls_button = nullptr;
     QLabel* games_label = nullptr;

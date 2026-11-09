@@ -32,6 +32,8 @@ public:
     YUZU_NON_MOVEABLE(PlayTimeManager);
 
     u64 GetPlayTime(u64 program_id) const;
+    /// When the program last ran, in seconds since the Unix epoch (0: never).
+    s64 GetLastPlayed(u64 program_id) const;
     void ResetProgramPlayTime(u64 program_id);
     void SetProgramId(u64 program_id);
     void SetPlayTime(u64 program_id, u64 play_time);
@@ -46,8 +48,10 @@ public:
 private:
     void AutoTimestamp(std::stop_token stop_token);
     void Save();
+    void SaveLastPlayed();
 
     PlayTimeDatabase database;
+    std::map<ProgramId, s64> last_played;
     u64 running_program_id{};
     std::jthread play_time_thread;
 };

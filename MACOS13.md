@@ -54,9 +54,11 @@ helps most.
 
 ### Interface
 
-The default theme, "Ryujinx", follows Ryujinx's layout: menus in the window, a toolbar with
-list/grid buttons, an icon size slider, sorting and search, games as cards, and a short status bar
-(refresh, game count, **Controls**, docked mode, volume). The other themes are under
+The default theme, "Ryujinx", follows Ryujinx's layout (sizes and colours taken from Ryujinx's
+MIT-licensed `ApplicationListView.axaml`, `MainMenuBarView.axaml` and `Themes.xaml`): menus in the window, a toolbar with
+list/grid buttons, an icon size slider, sorting and search, games as cards (icon, title, file, version; title ID and type; last
+played, time played, size), menus File / Options / Actions / View / Help, and Ryujinx's status bar
+(game count and total play time while idle; docked mode and volume in game) plus **Controls**. The other themes are under
 Settings → General → UI.
 
 **Controls** on the status bar, or Emulation → Controls..., opens the button mapping directly

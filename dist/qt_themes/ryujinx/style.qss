@@ -11,7 +11,7 @@ QWidget {
     color: #ffffff;
     selection-background-color: #4ca2ff;
     selection-color: #ffffff;
-    font-size: 13px;
+    font-size: 14px;
 }
 
 QWidget:disabled {
@@ -115,7 +115,7 @@ QWidget#RyujinxToolbar QToolButton:hover {
 
 QWidget#RyujinxToolbar QToolButton:checked {
     background-color: #393939;
-    border: 1px solid #4ca2ff;
+    border: 1px solid #393939;
 }
 
 QWidget#RyujinxToolbar QLineEdit, QWidget#RyujinxToolbar QComboBox {
