@@ -76,10 +76,13 @@ Settings → General → UI.
 ## Performance on an M1 (8-core GPU, 16 GB)
 
 - Title screen: 60 fps.
-- Gameplay at 1x: about 6 fps (about 160 ms per frame, inside Link's house). The GPU is ~94% busy:
-  the game is GPU-bound. FXAA, the scaling filter and post-processing effects cost almost nothing;
-  the game's own shaders are the cost (its main lit-material shader alone is ~20 ms per frame).
-- Gameplay at 0.5x: about 8 fps.
+- Gameplay at 0.5x: about 12 fps (~83 ms per frame). 0.75x: about 9.5 fps (~108 ms). 1x: about
+  7 fps (~138 ms). 0.5x still looks clean and is the setting to use on a base M1.
+- At 1x the GPU is ~94% busy. A Metal System Trace puts ~55 ms of every frame in one pass, the main
+  1440x810 scene pass, mostly three of the game's material shaders. FXAA, the scaling filter and
+  post-processing effects cost almost nothing.
+- Ocarina of Time runs a frame ahead here (its CPU work overlaps the GPU's), which took 0.5x from
+  ~115 to ~80 ms per frame.
 - Memory: the process settles around 12 GB (about 5 GB is the game's own RAM). With other apps
   open, a 16 GB Mac swaps. Close what you can.
 
@@ -102,6 +105,8 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 | Null texture fallback had 2D views for every texture type (on a 1D image) | One null image per dimension, and a view of each declared type |
 | No `VK_EXT_mesh_shader`: mesh draws skipped (OOT: the door of Link's house, ~30 draws a frame) | Task and mesh programs run as compute shaders that write a vertex buffer, drawn by a generated vertex shader (`vk_mesh_emulation.h`) |
 | Every draw sampling the bound depth buffer ended the render pass (~95 per OOT frame) | End the pass only if it wrote depth or stencil (185 → 160 ms per frame on an M1) |
+| Washed-out, white picture with pink outlines | The volumetric fog compute program is miscompiled by Metal into NaNs and infinities, which the bloom spreads over the frame. That program's float results are sanitized on MoltenVK, and render target and image outputs are made finite as NVIDIA's conversions give |
+| CPU and GPU never overlapped (each present waited for its own frame) | OOT runs a frame ahead (`EDEN_NX2_FRAMES_AHEAD=0` waits again); unmet semaphore acquires no longer wait for the GPU to drain |
 
 ## Known issues
 
@@ -111,8 +116,6 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
   emulation off.
 - **Metal compiler crashes.** macOS 13's Metal compiler crashes ("Compiler encountered an internal
   error") on two of the game's compute shaders, so those dispatches are skipped.
-- **Washed-out gameplay picture.** This is an upstream issue on every platform (see
-  `.claude/skills/nx2-lab-automation/references/ocarina-of-time.md`), not specific to macOS.
 - **Lost video frames.** Video frames are dropped when the game draws more slowly than the movie
   plays. This is deliberate, to keep the picture in sync with the sound.
 - **Signing.** The app is ad-hoc signed, not notarized.
@@ -128,5 +131,9 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
   program, how render passes switch, and the call sites that end them. (MoltenVK on Apple GPUs
   timestamps per command buffer, so the per-pass times read zero.)
 - `EDEN_NX2_LOG_FPS=1` (eden-cli) logs the frame rate and frame time every 5 s.
+- `EDEN_NX2_GPU_TIMING=2` labels render passes (`RP#n`) and dispatches for
+  `xcrun xctrace record --template 'Metal System Trace'`; `=3` gives every draw its own pass.
+- `EDEN_NX2_IR_DUMP=<hash>,<dir>` writes a compute program's IR; `EDEN_NX2_NAN_SANITIZE=<hash>:<ops>`
+  replaces NaN/infinite results of chosen IR operations with 0 (finding NaN sources).
 - `EDEN_UI_SNAPSHOT=<png>` with `QT_QPA_PLATFORM=offscreen` saves the main window (and with
   `EDEN_UI_SNAPSHOT_CONTROLS=<png>` the controls settings) without a display.
