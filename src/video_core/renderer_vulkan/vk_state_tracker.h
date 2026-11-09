@@ -89,6 +89,13 @@ public:
         stencil_reset = true;
     }
 
+    /// After a pipeline with static topology, restart enable and vertex input.
+    void InvalidatePipelineInputState() {
+        current_topology = INVALID_TOPOLOGY;
+        (*flags)[Dirty::PrimitiveRestartEnable] = true;
+        (*flags)[Dirty::VertexInput] = true;
+    }
+
     void InvalidateViewports() {
         (*flags)[Dirty::Viewports] = true;
     }

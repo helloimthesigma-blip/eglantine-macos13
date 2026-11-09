@@ -285,20 +285,30 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
         execution_model = spv::ExecutionModel::Vertex;
         break;
     case Stage::Task:
+    case Stage::Mesh:
+        if (ctx.mesh_emulated) {
+            execution_model = spv::ExecutionModel::GLCompute;
+            ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, program.workgroup_size[0],
+                                 1U, 1U);
+            break;
+        }
+        if (program.stage == Stage::Mesh) {
+            execution_model = spv::ExecutionModel::MeshEXT;
+            ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, program.workgroup_size[0],
+                                 1U, 1U);
+            ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices,
+                                 program.mesh.max_vertices);
+            ctx.AddExecutionMode(main, spv::ExecutionMode::OutputPrimitivesEXT,
+                                 program.mesh.max_primitives);
+            ctx.AddExecutionMode(main, program.mesh.topology == 0 ? spv::ExecutionMode::OutputPoints
+                                       : program.mesh.topology == 1
+                                           ? spv::ExecutionMode::OutputLinesEXT
+                                           : spv::ExecutionMode::OutputTrianglesEXT);
+            break;
+        }
         execution_model = spv::ExecutionModel::TaskEXT;
         ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, program.workgroup_size[0], 1U,
                              1U);
-        break;
-    case Stage::Mesh:
-        execution_model = spv::ExecutionModel::MeshEXT;
-        ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, program.workgroup_size[0], 1U,
-                             1U);
-        ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices, program.mesh.max_vertices);
-        ctx.AddExecutionMode(main, spv::ExecutionMode::OutputPrimitivesEXT,
-                             program.mesh.max_primitives);
-        ctx.AddExecutionMode(main, program.mesh.topology == 0   ? spv::ExecutionMode::OutputPoints
-                                   : program.mesh.topology == 1 ? spv::ExecutionMode::OutputLinesEXT
-                                                                : spv::ExecutionMode::OutputTrianglesEXT);
         break;
     case Stage::TessellationControl:
         execution_model = spv::ExecutionModel::TessellationControl;

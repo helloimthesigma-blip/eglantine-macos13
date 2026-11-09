@@ -1810,6 +1810,11 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         }
         const bool is_integer = input_type == AttributeType::SignedInt ||
                                 input_type == AttributeType::UnsignedInt;
+        if (runtime_info.per_primitive_generics.test(index) && profile.emulate_mesh_shaders) {
+            // Emulated mesh programs repeat the primitive's values on its three vertices.
+            Decorate(id, spv::Decoration::Flat);
+            continue;
+        }
         if (runtime_info.per_primitive_generics.test(index)) {
             // Written per primitive by a mesh program: constant over the primitive.
             AddExtension("SPV_EXT_mesh_shader");
@@ -1852,16 +1857,24 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     if (stage != Stage::Task && stage != Stage::Mesh) {
         return;
     }
-    AddExtension("SPV_EXT_mesh_shader");
-    AddCapability(spv::Capability::MeshShadingEXT);
+    mesh_emulated = runtime_info.mesh_emulation.enabled;
+    if (!mesh_emulated) {
+        AddExtension("SPV_EXT_mesh_shader");
+        AddCapability(spv::Capability::MeshShadingEXT);
+    }
     mesh_info = program.mesh;
     mesh_threads = program.workgroup_size[0];
-    // The task's output region, which its mesh workgroups read as their input region.
+    // The task's output region, which its mesh workgroups read as their input region. Emulated,
+    // it is workgroup memory, copied through the payload buffer.
+    const spv::StorageClass payload_class{mesh_emulated ? spv::StorageClass::Workgroup
+                                                        : spv::StorageClass::TaskPayloadWorkgroupEXT};
     const Id payload_type{TypeArray(U32[1], Const(mesh_info.payload_words))};
-    mesh_payload = DefineVariable(*this, payload_type, std::nullopt,
-                                  spv::StorageClass::TaskPayloadWorkgroupEXT);
+    mesh_payload = DefineVariable(*this, payload_type, std::nullopt, payload_class);
     Name(mesh_payload, "task_payload");
-    mesh_payload_u32 = TypePointer(spv::StorageClass::TaskPayloadWorkgroupEXT, U32[1]);
+    mesh_payload_u32 = TypePointer(payload_class, U32[1]);
+    if (mesh_emulated) {
+        DefineMeshEmulation();
+    }
     if (stage == Stage::Task) {
         return;
     }
@@ -1884,6 +1897,9 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     mesh_primitive_count =
         DefineVariable(*this, U32[1], std::nullopt, spv::StorageClass::Workgroup);
     Name(mesh_primitive_count, "isbe_primitive_count");
+    if (mesh_emulated) {
+        return; // the epilogue writes the vertex buffer instead of outputs
+    }
 
     const Id vertex_count{Const(mesh_info.max_vertices)};
     const Id primitive_count{Const(mesh_info.max_primitives)};
@@ -1964,6 +1980,47 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     for (const u32 line : mesh_info.primitive_lines) {
         mesh_primitive_targets.push_back(target(line, true));
     }
+}
+
+void EmitContext::DefineMeshEmulation() {
+    AddExtension("SPV_KHR_storage_buffer_storage_class");
+    const Id array_type{TypeRuntimeArray(U32[1])};
+    Decorate(array_type, spv::Decoration::ArrayStride, 4U);
+    const Id struct_type{TypeStruct(array_type)};
+    Decorate(struct_type, spv::Decoration::Block);
+    MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+    const Id struct_pointer{TypePointer(spv::StorageClass::StorageBuffer, struct_type)};
+    mesh_emu_u32 = TypePointer(spv::StorageClass::StorageBuffer, U32[1]);
+    mesh_shared_u32 = TypePointer(spv::StorageClass::Workgroup, U32[1]);
+    static constexpr std::array names{"mesh_emu_args", "mesh_emu_list", "mesh_emu_payload",
+                                      "mesh_emu_vertices"};
+    for (u32 index = 0; index < MESH_EMU_NUM_BUFFERS; ++index) {
+        const Id id{AddGlobalVariable(struct_pointer, spv::StorageClass::StorageBuffer)};
+        Decorate(id, spv::Decoration::DescriptorSet, MESH_EMU_SET);
+        Decorate(id, spv::Decoration::Binding, index);
+        Name(id, names[index]);
+        if (profile.supported_spirv >= 0x00010400) {
+            interfaces.push_back(id);
+        }
+        mesh_emu_buffers[index] = id;
+    }
+    if (!Sirit::ValidId(workgroup_id)) {
+        workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
+    }
+    if (!Sirit::ValidId(local_invocation_id)) {
+        local_invocation_id = DefineInput(*this, U32[3], false, spv::BuiltIn::LocalInvocationId);
+    }
+    mesh_emu_group = DefineVariable(*this, U32[1], std::nullopt, spv::StorageClass::Private);
+    Name(mesh_emu_group, "mesh_emu_group");
+    mesh_emu_local = DefineVariable(*this, U32[1], std::nullopt, spv::StorageClass::Private);
+    Name(mesh_emu_local, "mesh_emu_local");
+    mesh_emu_task = DefineVariable(*this, U32[1], std::nullopt, spv::StorageClass::Private);
+    Name(mesh_emu_task, "mesh_emu_task");
+    mesh_emu_counter = DefineVariable(*this, U32[1], std::nullopt, spv::StorageClass::Private);
+    Name(mesh_emu_counter, "mesh_emu_counter");
+    mesh_emu_shared = DefineVariable(*this, TypeArray(U32[1], Const(2U)), std::nullopt,
+                                     spv::StorageClass::Workgroup);
+    Name(mesh_emu_shared, "mesh_emu_shared");
 }
 
 void EmitContext::DefineOutputs(const IR::Program& program) {

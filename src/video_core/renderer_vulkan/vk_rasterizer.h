@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <span>
 
 #include <boost/container/static_vector.hpp>
@@ -22,6 +23,7 @@
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_fence_manager.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
+#include "video_core/renderer_vulkan/vk_mesh_emulation.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
@@ -250,6 +252,8 @@ private:
     QueryCacheRuntime query_cache_runtime;
     QueryCache query_cache;
     PipelineCache pipeline_cache;
+    /// Task/mesh programs as compute shaders, without VK_EXT_mesh_shader.
+    std::unique_ptr<MeshEmulation> mesh_emulation;
     AccelerateDMA accelerate_dma;
     FenceManager fence_manager;
     FrameDump frame_dump;
@@ -262,6 +266,8 @@ private:
 
     u32 draw_counter = 0;
     bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline
+    /// How to draw it when the task/mesh programs are emulated (set by PrepareDraw).
+    std::optional<GraphicsPipeline::MeshEmulationDraw> mesh_emulation_draw;
 };
 
 } // namespace Vulkan

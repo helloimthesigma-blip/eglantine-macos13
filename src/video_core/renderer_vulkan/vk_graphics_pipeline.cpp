@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_mesh_emulation.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -57,7 +58,11 @@ using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
 
 // The stage of a program: task and mesh programs sit in the vertex and tessellation slots.
-VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits slot_stage) {
+VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits slot_stage,
+                                bool mesh_emulated = false) {
+    if (mesh_emulated && (info.is_task || info.is_mesh)) {
+        return VK_SHADER_STAGE_COMPUTE_BIT; // vk_mesh_emulation.h
+    }
     if (info.is_task) {
         return VK_SHADER_STAGE_TASK_BIT_EXT;
     }
@@ -67,7 +72,8 @@ VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits 
     return slot_stage;
 }
 
-DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader::Info> infos) {
+DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader::Info> infos,
+                                    bool mesh_emulated) {
     DescriptorLayoutBuilder builder{device};
     for (size_t index = 0; index < infos.size(); ++index) {
         static constexpr std::array stages{
@@ -77,7 +83,7 @@ DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader
             VK_SHADER_STAGE_GEOMETRY_BIT,
             VK_SHADER_STAGE_FRAGMENT_BIT,
         };
-        builder.Add(infos[index], StageFlag(infos[index], stages.at(index)));
+        builder.Add(infos[index], StageFlag(infos[index], stages.at(index), mesh_emulated));
     }
     return builder;
 }
@@ -271,11 +277,12 @@ GraphicsPipeline::GraphicsPipeline(
     Common::ThreadWorker* worker_thread,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
-    const std::array<const Shader::Info*, NUM_STAGES>& infos)
+    const std::array<const Shader::Info*, NUM_STAGES>& infos, MeshEmulationSetup mesh_setup)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)} {
+      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
+      mesh_emu{std::move(mesh_setup)} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -296,9 +303,12 @@ GraphicsPipeline::GraphicsPipeline(
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
 
-    DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
-    uses_push_descriptor = builder.CanUsePushDescriptor();
-    uses_descriptor_buffer = builder.CanUseDescriptorBuffer() && descriptor_buffer_ring.IsValid();
+    const bool mesh_emulated{IsMeshEmulated()};
+    DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos, mesh_emulated)};
+    // Emulated mesh pipelines bind their set to the compute and graphics bind points both.
+    uses_push_descriptor = !mesh_emulated && builder.CanUsePushDescriptor();
+    uses_descriptor_buffer = !mesh_emulated && builder.CanUseDescriptorBuffer() &&
+                             descriptor_buffer_ring.IsValid();
     descriptor_set_layout =
         builder.CreateDescriptorSetLayout(uses_push_descriptor, uses_descriptor_buffer);
     if (uses_descriptor_buffer) {
@@ -315,7 +325,39 @@ GraphicsPipeline::GraphicsPipeline(
     }
 
     const VkDescriptorSetLayout set_layout{*descriptor_set_layout};
-    pipeline_layout = builder.CreatePipelineLayout(set_layout);
+    if (mesh_emulated) {
+        // Set 0: the programs' resources; set 1: the emulation buffers. The push constants reach
+        // the compute shaders too.
+        if (!set_layout) {
+            mesh_emu_empty_layout = device.GetLogical().CreateDescriptorSetLayout({
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .bindingCount = 0,
+                .pBindings = nullptr,
+            });
+        }
+        const std::array<VkDescriptorSetLayout, 2> set_layouts{
+            set_layout ? set_layout : *mesh_emu_empty_layout, mesh_emu.resources->SetLayout()};
+        using Shader::Backend::SPIRV::RenderAreaLayout;
+        using Shader::Backend::SPIRV::RescalingLayout;
+        const VkPushConstantRange range{
+            .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT,
+            .offset = 0,
+            .size = static_cast<u32>(sizeof(RescalingLayout) + sizeof(RenderAreaLayout)),
+        };
+        pipeline_layout = device.GetLogical().CreatePipelineLayout({
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = static_cast<u32>(set_layouts.size()),
+            .pSetLayouts = set_layouts.data(),
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &range,
+        });
+    } else {
+        pipeline_layout = builder.CreatePipelineLayout(set_layout);
+    }
     if (!uses_descriptor_buffer) {
         descriptor_update_template =
             builder.CreateTemplate(set_layout, *pipeline_layout, uses_push_descriptor);
@@ -330,7 +372,11 @@ GraphicsPipeline::GraphicsPipeline(
         Validate();
         try {
             MakePipeline(render_pass);
+            if (IsMeshEmulated()) {
+                MakeMeshEmulationPipelines();
+            }
         } catch (const vk::Exception& exception) {
+            pipeline.reset(); // an emulated mesh pipeline is unusable without its compute halves
             LOG_CRITICAL(Render_Vulkan,
                          "Graphics pipeline build failed: {} (stages: tcs={} tes={} geom={}, "
                          "patch control points {}, device max patch size {})",
@@ -353,6 +399,9 @@ GraphicsPipeline::GraphicsPipeline(
         for (vk::ShaderModule& module : spv_modules) {
             module.reset();
         }
+        mesh_emu.vertex_module.reset();
+        mesh_emu_task_module.reset();
+        mesh_emu_mesh_module.reset();
 
         std::scoped_lock lock{build_mutex};
         is_built = true;
@@ -363,6 +412,16 @@ GraphicsPipeline::GraphicsPipeline(
     }};
     // Before the build: it frees the modules this looks at.
     configure_func = ConfigureFunc(spv_modules, stage_infos);
+    if (mesh_emulated) {
+        // The task and mesh modules become compute pipelines, not graphics stages.
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            if (stage_infos[stage].is_task) {
+                mesh_emu_task_module = std::move(spv_modules[stage]);
+            } else if (stage_infos[stage].is_mesh) {
+                mesh_emu_mesh_module = std::move(spv_modules[stage]);
+            }
+        }
+    }
     build_task = std::move(func);
     if (worker_thread) {
         worker_thread->QueueWork([this] { RunBuild(); });
@@ -682,7 +741,191 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
+    if (IsMeshEmulated()) {
+        const auto& draw_state{maxwell3d->draw_manager.draw_state};
+        mesh_emu_groups = is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
+        return ConfigureMeshEmulationDraw(rescaling, render_area);
+    }
     return ConfigureDraw(rescaling, render_area);
+}
+
+namespace {
+void MeshEmulationBarrier(vk::CommandBuffer cmdbuf, VkPipelineStageFlags src_stages,
+                          VkAccessFlags src_access, VkPipelineStageFlags dst_stages,
+                          VkAccessFlags dst_access) {
+    const VkMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = src_access,
+        .dstAccessMask = dst_access,
+    };
+    cmdbuf.PipelineBarrier(src_stages, dst_stages, 0, barrier);
+}
+} // Anonymous namespace
+
+GraphicsPipeline::MeshEmulationDraw GraphicsPipeline::GetMeshEmulationDraw() const noexcept {
+    if (mesh_emu.params.has_task) {
+        return {.args = mesh_emu.resources->ArgsBuffer(), .vertices = 0};
+    }
+    return {.args = VK_NULL_HANDLE,
+            .vertices = (std::min)(mesh_emu_groups, mesh_emu.params.max_groups) *
+                        mesh_emu.params.group_vertices};
+}
+
+// Runs the task and mesh programs as compute shaders outside the render pass, then binds the
+// graphics pipeline whose vertex shader reads their output (vk_mesh_emulation.h).
+bool GraphicsPipeline::ConfigureMeshEmulationDraw(const RescalingPushConstant& rescaling,
+                                                  const RenderAreaPushConstant& render_area) {
+    const void* const descriptor_data{guest_descriptor_queue.UpdateData()};
+    scheduler.RequestOutsideRenderPassOperationContext();
+    if (!is_built.load(std::memory_order::relaxed)) {
+        scheduler.Record([this](vk::CommandBuffer) {
+            RunBuild();
+            std::unique_lock lock{build_mutex};
+            build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+        });
+    }
+    const bool is_rescaling{texture_cache.IsRescaling()};
+    const f32 config_down_factor{Settings::values.resolution_info.down_factor};
+    const f32 down_factor{is_rescaling ? config_down_factor : 1.0f};
+    const auto push_constants = [this, rescaling_data = rescaling.Data(), down_factor,
+                                 uses_render_area = render_area.uses_render_area,
+                                 render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
+        static constexpr VkShaderStageFlags stages{VK_SHADER_STAGE_ALL_GRAPHICS |
+                                                   VK_SHADER_STAGE_COMPUTE_BIT};
+        cmdbuf.PushConstants(*pipeline_layout, stages, RESCALING_LAYOUT_WORDS_OFFSET,
+                             sizeof(rescaling_data), rescaling_data.data());
+        cmdbuf.PushConstants(*pipeline_layout, stages, RESCALING_LAYOUT_DOWN_FACTOR_OFFSET,
+                             sizeof(down_factor), &down_factor);
+        if (uses_render_area) {
+            cmdbuf.PushConstants(*pipeline_layout, stages, RENDERAREA_LAYOUT_OFFSET,
+                                 sizeof(render_area_data), &render_area_data);
+        }
+    };
+    const auto bind_sets = [this](vk::CommandBuffer cmdbuf, VkPipelineBindPoint bind_point) {
+        const VkDescriptorSet emulation_set{mesh_emu.resources->Set()};
+        if (mesh_emu_set) {
+            const std::array<VkDescriptorSet, 2> sets{mesh_emu_set, emulation_set};
+            cmdbuf.BindDescriptorSets(bind_point, *pipeline_layout, 0, sets, {});
+        } else {
+            cmdbuf.BindDescriptorSets(bind_point, *pipeline_layout, 1, emulation_set, {});
+        }
+    };
+    scheduler.Record([this, descriptor_data, groups = mesh_emu_groups, push_constants,
+                      bind_sets](vk::CommandBuffer cmdbuf) {
+        mesh_emu_set = VK_NULL_HANDLE;
+        if (!pipeline || !mesh_emu_mesh_pipeline) {
+            return;
+        }
+        if (descriptor_set_layout) {
+            mesh_emu_set = descriptor_allocator.Commit();
+            device.GetLogical().UpdateDescriptorSet(mesh_emu_set, *descriptor_update_template,
+                                                    descriptor_data);
+        }
+        static constexpr VkPipelineStageFlags reader_stages{
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT};
+        static constexpr VkAccessFlags reader_access{VK_ACCESS_SHADER_READ_BIT |
+                                                     VK_ACCESS_SHADER_WRITE_BIT |
+                                                     VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
+        // The previous emulated draw is done with the buffers.
+        MeshEmulationBarrier(cmdbuf, reader_stages, reader_access,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT |
+                                 VK_ACCESS_SHADER_WRITE_BIT);
+        const auto& params{mesh_emu.params};
+        if (params.has_task && mesh_emu_task_pipeline) {
+            // Dispatch (0, 1, 1), draw (0, 1, 0, 0), allocation counter 0.
+            const VkBuffer args{mesh_emu.resources->ArgsBuffer()};
+            cmdbuf.FillBuffer(args, 0, MeshEmulation::ARGS_SIZE, 0);
+            cmdbuf.FillBuffer(args, 4, 8, 1);
+            cmdbuf.FillBuffer(args, (Shader::MESH_EMU_ARGS_DRAW_WORD + 1) * 4, 4, 1);
+            MeshEmulationBarrier(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_emu_task_pipeline);
+            bind_sets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE);
+            push_constants(cmdbuf);
+            cmdbuf.Dispatch((std::min)(groups, 65535U), 1, 1);
+            MeshEmulationBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_ACCESS_SHADER_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_emu_mesh_pipeline);
+            cmdbuf.DispatchIndirect(args, 0);
+        } else {
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_emu_mesh_pipeline);
+            bind_sets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE);
+            push_constants(cmdbuf);
+            const u32 mesh_groups{(std::min)(groups, params.max_groups)};
+            if (mesh_groups != 0) {
+                cmdbuf.Dispatch(mesh_groups, 1, 1);
+            }
+        }
+        MeshEmulationBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_SHADER_WRITE_BIT,
+                             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    });
+    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.UpdateRescaling(is_rescaling);
+    const bool bind_pipeline{scheduler.UpdateGraphicsPipeline(this)};
+    scheduler.Record([this, bind_pipeline, push_constants, bind_sets](vk::CommandBuffer cmdbuf) {
+        if (bind_pipeline || !pipeline || !mesh_emu_mesh_pipeline) {
+            scheduler.SetGraphicsPipelineMissing(!pipeline || !mesh_emu_mesh_pipeline);
+            if (!pipeline || !mesh_emu_mesh_pipeline) {
+                return;
+            }
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
+        }
+        push_constants(cmdbuf);
+        bind_sets(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    });
+    return true;
+}
+
+void GraphicsPipeline::MakeMeshEmulationPipelines() {
+    const auto make = [&](const vk::ShaderModule& module, bool is_task) {
+        const Shader::Info* info{};
+        for (const Shader::Info& stage_info : stage_infos) {
+            if ((is_task && stage_info.is_task) || (!is_task && stage_info.is_mesh)) {
+                info = &stage_info;
+            }
+        }
+        const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+            .pNext = nullptr,
+            .requiredSubgroupSize = GuestWarpSize,
+        };
+        const bool warp_size{info && info->UsesWarpOps() &&
+                             device.IsExtSubgroupSizeControlSupported() &&
+                             device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)};
+        return device.GetLogical().CreateComputePipeline(
+            {
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext = warp_size ? &subgroup_size_ci : nullptr,
+                    .flags = 0,
+                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module = *module,
+                    .pName = "main",
+                    .pSpecializationInfo = nullptr,
+                },
+                .layout = *pipeline_layout,
+                .basePipelineHandle = nullptr,
+                .basePipelineIndex = 0,
+            },
+            *pipeline_cache);
+    };
+    if (mesh_emu_task_module) {
+        mesh_emu_task_pipeline = make(mesh_emu_task_module, true);
+    }
+    mesh_emu_mesh_pipeline = make(mesh_emu_mesh_module, false);
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
@@ -1182,6 +1425,26 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                                             }),
                              dynamic_states.end());
     }
+    // Emulated mesh pipelines draw a list of the vertex buffer's records, no vertex input.
+    const VkPipelineVertexInputStateCreateInfo mesh_emu_vertex_input_ci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 0,
+        .pVertexBindingDescriptions = nullptr,
+        .vertexAttributeDescriptionCount = 0,
+        .pVertexAttributeDescriptions = nullptr,
+    };
+    const u32 mesh_emu_primitive_vertices{mesh_emu.params.primitive_vertices};
+    const VkPipelineInputAssemblyStateCreateInfo mesh_emu_input_assembly_ci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .topology = mesh_emu_primitive_vertices == 1   ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+                    : mesh_emu_primitive_vertices == 2 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                                                       : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE,
+    };
     const VkPipelineDynamicStateCreateInfo dynamic_state_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
         .pNext = nullptr,
@@ -1195,6 +1458,17 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .requiredSubgroupSize = GuestWarpSize,
     };
     static_vector<VkPipelineShaderStageCreateInfo, 5> shader_stages;
+    if (IsMeshEmulated()) {
+        shader_stages.push_back({
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = *mesh_emu.vertex_module,
+            .pName = "main",
+            .pSpecializationInfo = nullptr,
+        });
+    }
     for (size_t stage = 0; stage < Maxwell::MaxShaderStage; ++stage) {
         if (!spv_modules[stage]) {
             continue;
@@ -1232,8 +1506,12 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .flags = flags,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
-        .pVertexInputState = is_mesh ? nullptr : &vertex_input_ci,
-        .pInputAssemblyState = is_mesh ? nullptr : &input_assembly_ci,
+        .pVertexInputState = !is_mesh ? &vertex_input_ci
+                             : IsMeshEmulated() ? &mesh_emu_vertex_input_ci
+                                                : nullptr,
+        .pInputAssemblyState = !is_mesh ? &input_assembly_ci
+                               : IsMeshEmulated() ? &mesh_emu_input_assembly_ci
+                                                  : nullptr,
         .pTessellationState = is_mesh ? nullptr : &tessellation_ci,
         .pViewportState = &viewport_ci,
         .pRasterizationState = &rasterization_ci,

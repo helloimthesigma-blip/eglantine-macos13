@@ -39,4 +39,10 @@ constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area)
     return EmitSPIRV(profile, {}, program, binding);
 }
 
+/// The vertex shader that draws an emulated mesh program's output (RuntimeInfo::mesh_emulation):
+/// one record of the vertex buffer per vertex, culled when the record is flagged invalid.
+[[nodiscard]] std::vector<u32> EmitMeshEmulationVertexSPIRV(const Profile& profile,
+                                                            const RuntimeInfo& runtime_info,
+                                                            const MeshInfo& mesh);
+
 } // namespace Shader::Backend::SPIRV

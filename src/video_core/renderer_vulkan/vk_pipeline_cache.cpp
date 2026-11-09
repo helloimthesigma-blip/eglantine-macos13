@@ -34,6 +34,7 @@
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/vk_mesh_emulation.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -422,8 +423,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         subgroup_stage_bit(VK_SHADER_STAGE_GEOMETRY_BIT, Shader::Stage::Geometry) |
         subgroup_stage_bit(VK_SHADER_STAGE_FRAGMENT_BIT, Shader::Stage::Fragment) |
         subgroup_stage_bit(VK_SHADER_STAGE_COMPUTE_BIT, Shader::Stage::Compute) |
-        subgroup_stage_bit(VK_SHADER_STAGE_TASK_BIT_EXT, Shader::Stage::Task) |
-        subgroup_stage_bit(VK_SHADER_STAGE_MESH_BIT_EXT, Shader::Stage::Mesh)};
+        // Emulated task and mesh programs run as compute shaders.
+        subgroup_stage_bit(device.IsExtMeshShaderSupported() ? VK_SHADER_STAGE_TASK_BIT_EXT
+                                                             : VK_SHADER_STAGE_COMPUTE_BIT,
+                           Shader::Stage::Task) |
+        subgroup_stage_bit(device.IsExtMeshShaderSupported() ? VK_SHADER_STAGE_MESH_BIT_EXT
+                                                             : VK_SHADER_STAGE_COMPUTE_BIT,
+                           Shader::Stage::Mesh)};
     if (driver_id == VK_DRIVER_ID_MESA_TURNIP) {
         supported_subgroup_stages &= ~(1u << static_cast<u32>(Shader::Stage::Geometry));
     }
@@ -522,6 +528,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_user_clip_distances = device.GetMaxUserClipDistances()
     };
+    // Without VK_EXT_mesh_shader (MoltenVK), task and mesh programs run as compute shaders.
+    // EDEN_NX2_NO_MESH_EMULATION=1 skips their draws instead.
+    profile.emulate_mesh_shaders = !device.IsExtMeshShaderSupported() &&
+                                   std::getenv("EDEN_NX2_NO_MESH_EMULATION") == nullptr;
 
     host_info = Shader::HostTranslateInfo{
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
@@ -1378,7 +1388,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         // skipped (see the pipeline check in the rasterizer).
         if ((env.ShaderStage() == Shader::Stage::Task ||
              env.ShaderStage() == Shader::Stage::Mesh) &&
-            !device.IsExtMeshShaderSupported()) {
+            !device.IsExtMeshShaderSupported() &&
+            (!profile.emulate_mesh_shaders || mesh_emulation == nullptr)) {
             static std::atomic<bool> logged{};
             if (!logged.exchange(true)) {
                 LOG_WARNING(Render_Vulkan, "Skipping task/mesh pipelines: the device has no VK_EXT_mesh_shader");
@@ -1450,6 +1461,30 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
 
+    // Task/mesh programs without VK_EXT_mesh_shader: compute shaders plus a vertex shader that
+    // draws their output (vk_mesh_emulation.h).
+    const Shader::IR::Program* emulated_mesh{};
+    bool emulated_task{};
+    for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+        if (key.unique_hashes[index] == 0) {
+            continue;
+        }
+        if (programs[index].stage == Shader::Stage::Mesh) {
+            emulated_mesh = &programs[index];
+        } else if (programs[index].stage == Shader::Stage::Task) {
+            emulated_task = true;
+        }
+    }
+    if (emulated_mesh && (device.IsExtMeshShaderSupported() || mesh_emulation == nullptr)) {
+        emulated_mesh = nullptr;
+    }
+    GraphicsPipeline::MeshEmulationSetup mesh_setup{};
+    Shader::RuntimeInfo mesh_runtime_info{};
+    if (emulated_mesh) {
+        mesh_setup.resources = mesh_emulation;
+        mesh_setup.params = MeshEmulation::MakeParams(emulated_mesh->mesh, emulated_task);
+    }
+
     const Shader::IR::Program* previous_stage{};
     Shader::Backend::Bindings binding;
     for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0; index < Maxwell::MaxShaderProgram;
@@ -1465,7 +1500,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const size_t stage_index{index - 1};
         infos[stage_index] = &program.info;
 
-        const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};
+        auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};
+        if (emulated_mesh &&
+            (program.stage == Shader::Stage::Task || program.stage == Shader::Stage::Mesh)) {
+            runtime_info.mesh_emulation = mesh_setup.params;
+            if (program.stage == Shader::Stage::Mesh) {
+                mesh_runtime_info = runtime_info;
+            }
+        }
         ConvertLegacyToGeneric(program, runtime_info);
         const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
         device.SaveShader(code);
@@ -1495,11 +1537,16 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         previous_stage = &program;
     }
+    if (emulated_mesh) {
+        mesh_setup.vertex_module = BuildShader(
+            device, Shader::Backend::SPIRV::EmitMeshEmulationVertexSPIRV(profile, mesh_runtime_info,
+                                                                         emulated_mesh->mesh));
+    }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, &shader_notify, device,
         descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
-        render_pass_cache, key, std::move(modules), infos);
+        render_pass_cache, key, std::move(modules), infos, std::move(mesh_setup));
 
 } catch (const Shader::Exception& exception) {
     auto hash = key.Hash();

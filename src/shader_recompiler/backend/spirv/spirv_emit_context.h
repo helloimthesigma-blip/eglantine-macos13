@@ -395,6 +395,16 @@ public:
     std::vector<MeshLineTarget> mesh_primitive_targets;
     std::array<Id, 2> mesh_outputs_marker{};
     std::array<Id, 4> mesh_tasks_marker{};
+    // Mesh emulation (RuntimeInfo::mesh_emulation): the set MESH_EMU_SET buffers, and per
+    // invocation, the mesh workgroup's output slot and its index among its task's workgroups.
+    bool mesh_emulated{};
+    std::array<Id, 4> mesh_emu_buffers{};
+    Id mesh_emu_u32{};      ///< pointer type to one word of those buffers
+    Id mesh_emu_group{};    ///< Private U32
+    Id mesh_emu_local{};    ///< Private U32
+    Id mesh_emu_task{};     ///< Private U32: the task workgroup whose payload it reads
+    Id mesh_emu_counter{};  ///< Private U32: loop counter of the epilogues
+    Id mesh_emu_shared{};   ///< Workgroup U32[2]: a task's first list entry and its count
 
     Id load_const_func_u8{};
     Id load_const_func_u16{};
@@ -436,6 +446,7 @@ private:
     void DefineInputs(const IR::Program& program);
     void DefineOutputs(const IR::Program& program);
     void DefineMesh(const IR::Program& program);
+    void DefineMeshEmulation();
 };
 
 } // namespace Shader::Backend::SPIRV

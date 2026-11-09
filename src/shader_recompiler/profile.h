@@ -51,6 +51,9 @@ struct Profile {
     bool support_derivative_control{};
     bool support_geometry_shader_passthrough{};
     bool support_native_ndc{};
+    /// No VK_EXT_mesh_shader: task and mesh programs run as compute shaders, and per-primitive
+    /// fragment inputs are flat (see emit_spirv_mesh.cpp).
+    bool emulate_mesh_shaders{};
     bool support_gl_nv_gpu_shader_5{};
     bool support_gl_amd_gpu_shader_half_float{};
     bool support_gl_texture_shadow_lod{};

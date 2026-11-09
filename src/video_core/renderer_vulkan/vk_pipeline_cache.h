@@ -89,6 +89,7 @@ namespace Vulkan {
 class ComputePipeline;
 class DescriptorPool;
 class Device;
+class MeshEmulation;
 class PipelineStatistics;
 class RenderPassCache;
 class Scheduler;
@@ -118,6 +119,11 @@ public:
     ~PipelineCache();
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
+
+    /// Buffers for emulated task/mesh programs (devices without VK_EXT_mesh_shader).
+    void SetMeshEmulation(MeshEmulation* mesh_emulation_) noexcept {
+        mesh_emulation = mesh_emulation_;
+    }
     [[nodiscard]] bool IsIndirectResetShader() const;
 
     /// Why the last CurrentGraphicsPipeline() returned null (diagnostics).
@@ -166,6 +172,7 @@ private:
     void QueueVulkanPipelineCacheFlush();
 
     const Device& device;
+    MeshEmulation* mesh_emulation{};
     Scheduler& scheduler;
     DescriptorPool& descriptor_pool;
     GuestDescriptorQueue& guest_descriptor_queue;

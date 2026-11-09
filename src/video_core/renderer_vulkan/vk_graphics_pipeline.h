@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "common/thread_worker.h"
+#include "shader_recompiler/runtime_info.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
@@ -68,16 +69,33 @@ struct hash<Vulkan::GraphicsPipelineCacheKey> {
 namespace Vulkan {
 
 class Device;
+class MeshEmulation;
 class PipelineStatistics;
 class RenderPassCache;
 class RescalingPushConstant;
 class RenderAreaPushConstant;
 class Scheduler;
 
+/// Task/mesh programs run as compute shaders (no VK_EXT_mesh_shader): the shared buffers, the
+/// programs' parameters and the vertex shader that draws their output.
+struct GraphicsPipelineMeshEmulationSetup {
+    MeshEmulation* resources{};
+    Shader::MeshEmulation params{};
+    vk::ShaderModule vertex_module;
+};
+
 class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
 public:
+    using MeshEmulationSetup = GraphicsPipelineMeshEmulationSetup;
+
+    /// How to draw an emulated mesh pipeline's output after Configure.
+    struct MeshEmulationDraw {
+        VkBuffer args{};    ///< draw from the args buffer (task programs), or
+        u32 vertices{};     ///< a fixed vertex count
+    };
+
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
         vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
@@ -86,7 +104,14 @@ public:
         DescriptorBufferRing& descriptor_buffer_ring, Common::ThreadWorker* worker_thread,
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
         const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
-        const std::array<const Shader::Info*, NUM_STAGES>& infos);
+        const std::array<const Shader::Info*, NUM_STAGES>& infos,
+        GraphicsPipelineMeshEmulationSetup mesh_setup = {});
+
+    [[nodiscard]] bool IsMeshEmulated() const noexcept {
+        return mesh_emu.resources != nullptr;
+    }
+
+    [[nodiscard]] MeshEmulationDraw GetMeshEmulationDraw() const noexcept;
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
     const std::array<u64, 6>& ShaderHashes() const noexcept {
@@ -181,6 +206,11 @@ private:
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
+    bool ConfigureMeshEmulationDraw(const RescalingPushConstant& rescaling,
+                                    const RenderAreaPushConstant& render_area);
+
+    void MakeMeshEmulationPipelines();
+
     void MakePipeline(VkRenderPass render_pass);
 
     void Validate();
@@ -232,6 +262,15 @@ private:
     std::atomic_bool is_built{false};
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
+
+    MeshEmulationSetup mesh_emu;
+    vk::ShaderModule mesh_emu_task_module;
+    vk::ShaderModule mesh_emu_mesh_module;
+    vk::Pipeline mesh_emu_task_pipeline;
+    vk::Pipeline mesh_emu_mesh_pipeline;
+    vk::DescriptorSetLayout mesh_emu_empty_layout; ///< set 0 when the programs bind nothing
+    u32 mesh_emu_groups{};                          ///< workgroups of the configured draw
+    VkDescriptorSet mesh_emu_set{};                 ///< set 0 of the recorded draw
 };
 
 } // namespace Vulkan
