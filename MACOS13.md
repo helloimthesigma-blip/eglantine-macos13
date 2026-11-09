@@ -49,7 +49,18 @@ Eglantine.app/Contents/MacOS/eden-cli -g "/path/to/game.nup"     # SDL frontend,
 ```
 
 For Ocarina of Time, the Qt app asks whether to use recommended settings. Answering Yes is a
-reasonable choice. On an M1, lowering the resolution (Graphics → Resolution) helps a little.
+reasonable choice. On an M1, lowering the resolution (Graphics → Resolution) is the setting that
+helps most.
+
+### Interface
+
+The default theme, "Ryujinx", follows Ryujinx's layout: menus in the window, a toolbar with
+list/grid buttons, an icon size slider, sorting and search, games as cards, and a short status bar
+(refresh, game count, **Controls**, docked mode, volume). The other themes are under
+Settings → General → UI.
+
+**Controls** on the status bar, or Emulation → Controls..., opens the button mapping directly
+(keyboard or controller, per player).
 
 ## What works (tested with The Legend of Zelda: Ocarina of Time, `0400486024DEC000`)
 
@@ -57,12 +68,15 @@ reasonable choice. On an M1, lowering the resolution (Graphics → Resolution) h
 - The title screen runs at 60 fps, including its AV1 video background.
 - The AV1 intro cutscene plays, with subtitles.
 - New Game reaches the first 3D scene (the forest near the Deku Tree), which renders.
+- Saves load; Link's house renders with its door (a mesh shader draw, see below).
 - A 15-minute run stayed up with no crash or device loss.
 
 ## Performance on an M1 (8-core GPU, 16 GB)
 
 - Title screen: 60 fps.
-- Gameplay at 1x: about 5 fps. The game is GPU-bound: each frame waits about 140 ms on the GPU.
+- Gameplay at 1x: about 6 fps (about 160 ms per frame, inside Link's house). The GPU is ~94% busy:
+  the game is GPU-bound. FXAA, the scaling filter and post-processing effects cost almost nothing;
+  the game's own shaders are the cost (its main lit-material shader alone is ~20 ms per frame).
 - Gameplay at 0.5x: about 8 fps.
 - Memory: the process settles around 12 GB (about 5 GB is the game's own RAM). With other apps
   open, a 16 GB Mac swaps. Close what you can.
@@ -84,11 +98,15 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 | Blending enabled on integer render targets | Leave blending off there (Vulkan ignores it; Metal does not) |
 | Device lost (`Internal Error 00000106`) in the first 3D scene | Clamp framebuffer size to `maxFramebufferWidth/Height`: attachment-less passes were sized 32768x32768 from the guest's surface clip |
 | Null texture fallback had 2D views for every texture type (on a 1D image) | One null image per dimension, and a view of each declared type |
+| No `VK_EXT_mesh_shader`: mesh draws skipped (OOT: the door of Link's house, ~30 draws a frame) | Task and mesh programs run as compute shaders that write a vertex buffer, drawn by a generated vertex shader (`vk_mesh_emulation.h`) |
+| Every draw sampling the bound depth buffer ended the render pass (~95 per OOT frame) | End the pass only if it wrote depth or stencil (185 → 160 ms per frame on an M1) |
 
 ## Known issues
 
-- **Mesh shaders.** MoltenVK has no `VK_EXT_mesh_shader`, so task/mesh draws are skipped. That is
-  about 200 draws per second in OOT gameplay, and some geometry may be missing.
+- **Mesh shaders** are emulated with compute shaders (see above). Indirect mesh draws are still
+  skipped, and many OOT mesh draws arrive with a zero count (upstream reads a GPU-written count
+  stale), so some mesh geometry may still be missing. `EDEN_NX2_NO_MESH_EMULATION=1` turns the
+  emulation off.
 - **Metal compiler crashes.** macOS 13's Metal compiler crashes ("Compiler encountered an internal
   error") on two of the game's compute shaders, so those dispatches are skipped.
 - **Washed-out gameplay picture.** This is an upstream issue on every platform (see
@@ -104,3 +122,9 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
   scissor. Pair it with `EDEN_NX2_REJECT_HASH` to bisect a crash that follows new programs.
 - `EDEN_NX2_SKIP_NO_COLOR=1|2|3` drops draws that have no colour target: all of them, only
   attachment-less ones, or only depth-only ones.
+- `EDEN_NX2_GPU_TIMING=1` counts render passes and dispatches per second by target size and
+  program, how render passes switch, and the call sites that end them. (MoltenVK on Apple GPUs
+  timestamps per command buffer, so the per-pass times read zero.)
+- `EDEN_NX2_LOG_FPS=1` (eden-cli) logs the frame rate and frame time every 5 s.
+- `EDEN_UI_SNAPSHOT=<png>` with `QT_QPA_PLATFORM=offscreen` saves the main window (and with
+  `EDEN_UI_SNAPSHOT_CONTROLS=<png>` the controls settings) without a display.
