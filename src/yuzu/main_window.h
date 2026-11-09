@@ -376,6 +376,8 @@ private slots:
     void OnMenuInstallToNAND();
     void OnMenuRecentFile();
     void OnConfigure();
+    /// Settings, opened on the Controls tab.
+    void OnConfigureControls();
     void OnConfigureTas();
     void OnDecreaseVolume();
     void OnIncreaseVolume();
@@ -627,4 +629,12 @@ protected:
     void dropEvent(QDropEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
+
+    // Ryujinx-style interface (UISettings theme "ryujinx"): the controls shortcut on the status bar, the
+    // game count shown while no game runs, and whether settings open on the Controls tab.
+    void SetupRyujinxInterface();
+    void SnapshotControls(const QString& path);
+    QPushButton* controls_button = nullptr;
+    QLabel* games_label = nullptr;
+    bool configure_controls_tab = false;
 };

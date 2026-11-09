@@ -23,6 +23,7 @@ public:
 
     void clear();
     void setFocus();
+    void SetFilterText(const QString& text);
 
 private:
     void changeEvent(QEvent*) override;

@@ -57,6 +57,9 @@ public:
 
     void ApplyConfiguration();
 
+    /// Opens on the Controls tab.
+    void ShowControlsTab();
+
 private slots:
     void OnLanguageChanged(const QString& locale);
 

@@ -30,6 +30,8 @@ class GameListModel;
 class GameTree;
 class GameGrid;
 class GameListSearchField;
+class RyujinxToolbar;
+class RyujinxCardDelegate;
 class ControllerNavigation;
 class GameListWorker;
 class GameListDir;
@@ -88,6 +90,9 @@ public:
 
     void ResetViewMode();
 
+    /// Shows the view mode and icon size on the Ryujinx-style toolbar, if there is one.
+    void SyncToolbar();
+
 public slots:
     void SetNupConversionRunning(bool running);
     void RefreshGameDirectory();
@@ -121,6 +126,9 @@ signals:
     void ShowList(bool show);
     void PopulatingCompleted();
     void SaveConfig();
+    /// From the Ryujinx-style toolbar.
+    void ViewModeRequested(Settings::GameListMode mode);
+    void IconSizeRequested(u32 size);
 
 private slots:
     void OnTextChanged(const QString& new_text);
@@ -149,6 +157,8 @@ private:
 
     std::shared_ptr<FileSys::VfsFilesystem> vfs;
     FileSys::ManualContentProvider* provider;
+    RyujinxToolbar* ryujinx_toolbar = nullptr;
+    RyujinxCardDelegate* card_delegate = nullptr;
     GameListSearchField* search_field = nullptr;
     MainWindow* main_window = nullptr;
     QVBoxLayout* layout = nullptr;

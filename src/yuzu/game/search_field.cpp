@@ -75,6 +75,10 @@ void GameListSearchField::clear() {
     edit_filter->clear();
 }
 
+void GameListSearchField::SetFilterText(const QString& text) {
+    edit_filter->setText(text);
+}
+
 void GameListSearchField::setFocus() {
     if (edit_filter->isVisible()) {
         edit_filter->setFocus();

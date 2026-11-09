@@ -43,6 +43,11 @@
 #include "set_play_time_dialog.h"
 #include "util/util.h"
 #include "yuzu/game/game_list.h"
+#include "yuzu/game/ryujinx_toolbar.h"
+#include "qt_common/game_list/game_list_p.h"
+#include <QTimer>
+#include <cstdlib>
+#include <initializer_list>
 #include "yuzu/nup_dialogs.h"
 
 #include "applets/qt_amiibo_settings.h"
@@ -458,6 +463,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     setAcceptDrops(true);
     ui->setupUi(this);
+#ifdef __APPLE__
+    // The Ryujinx-style interface keeps its menus in the window, as Ryujinx does.
+    if (IsRyujinxInterface()) {
+        menuBar()->setNativeMenuBar(false);
+    }
+#endif
     statusBar()->hide();
 
     startup_icon_theme = QIcon::themeName();
@@ -548,7 +559,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         UpdateAPIText();
         renderer_status_button->setDisabled(true);
         renderer_status_button->setChecked(false);
-    } else {
+    } else if (QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+        // (No native window to query under the offscreen platform, used for snapshots.)
         VkDeviceInfo::PopulateRecords(vk_device_records, this->window()->windowHandle());
     }
 
@@ -575,6 +587,23 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // so now we have to make this completely unnecessary call
     // to prevent the UI from blowing up.
     UpdateUITheme();
+
+    // EDEN_UI_SNAPSHOT=<png>: saves the main window after EDEN_UI_SNAPSHOT_DELAY ms (default 6000)
+    // and exits, for checking the interface without a display (QT_QPA_PLATFORM=offscreen).
+    // EDEN_UI_SNAPSHOT_CONTROLS=<png> also saves the controls settings.
+    if (const char* snapshot = std::getenv("EDEN_UI_SNAPSHOT")) {
+        const char* delay = std::getenv("EDEN_UI_SNAPSHOT_DELAY");
+        QTimer::singleShot(delay ? std::atoi(delay) : 6000, this,
+                           [this, path = QString::fromUtf8(snapshot)] {
+                               resize(1280, 760);
+                               QApplication::processEvents();
+                               grab().save(path);
+                               if (const char* controls = std::getenv("EDEN_UI_SNAPSHOT_CONTROLS")) {
+                                   SnapshotControls(QString::fromUtf8(controls));
+                               }
+                               std::_Exit(0);
+                           });
+    }
 
     if (QStringList args = QApplication::arguments(); args.size() >= 2) {
         QList<QByteArray> qba{};
@@ -1287,6 +1316,7 @@ void MainWindow::InitializeWidgets() {
     connect(refresh_button, &QPushButton::clicked, this, &MainWindow::OnGameListRefresh);
 
     statusBar()->insertPermanentWidget(0, refresh_button);
+    SetupRyujinxInterface();
 
     statusBar()->setVisible(true);
     setStyleSheet(QStringLiteral("QStatusBar::item{border: none;}"));
@@ -1532,6 +1562,15 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::PopulatingCompleted,
             [this] { multiplayer_state->UpdateGameList(game_list->GetModel()); });
     connect(game_list, &GameList::SaveConfig, this, &MainWindow::OnSaveConfig);
+    connect(game_list, &GameList::ViewModeRequested, this, &MainWindow::SetGameListMode);
+    connect(game_list, &GameList::IconSizeRequested, this, [this](u32 size) {
+        for (size_t i = 0; i < default_game_icon_sizes.size(); ++i) {
+            if (default_game_icon_sizes[i].first == size) {
+                game_size_actions->actions().at(static_cast<int>(i))->trigger();
+            }
+        }
+        game_list->SyncToolbar();
+    });
 
     connect(game_list, &GameList::OpenPerGameGeneralRequested, this,
             &MainWindow::OnGameListOpenPerGameProperties);
@@ -1594,6 +1633,12 @@ void MainWindow::ConnectMenuEvents() {
                                             ui->action_Reset_Window_Size_1080});
 
     connect_menu(ui->action_Grid_View, &MainWindow::SetGridView);
+    {
+        auto* controls_action = new QAction(tr("Controls..."), this);
+        controls_action->setMenuRole(QAction::NoRole);
+        ui->menu_Emulation->insertAction(ui->action_Configure_Current_Game, controls_action);
+        connect(controls_action, &QAction::triggered, this, &MainWindow::OnConfigureControls);
+    }
     connect_menu(ui->action_Tree_View, &MainWindow::SetTreeView);
     connect_menu(ui->action_Carousel_View, &MainWindow::SetCarouselView);
 
@@ -3668,6 +3713,76 @@ void MainWindow::ToggleShowGameName() {
     game_list->RefreshGameDirectory();
 }
 
+void MainWindow::SetupRyujinxInterface() {
+    // A Controls button on the status bar opens the button mapping directly (on macOS the
+    // settings otherwise hide in the application menu as "Preferences").
+    controls_button = new QPushButton(tr("\U0001F3AE  Controls"));
+    controls_button->setObjectName(QStringLiteral("ControlsStatusBarButton"));
+    controls_button->setFocusPolicy(Qt::NoFocus);
+    controls_button->setToolTip(tr("Map buttons for your keyboard or controller"));
+    connect(controls_button, &QPushButton::clicked, this, &MainWindow::OnConfigureControls);
+    statusBar()->insertPermanentWidget(1, controls_button);
+
+    if (!IsRyujinxInterface()) {
+        return;
+    }
+    // Ryujinx's bar: refresh, game count, controls, docked mode and volume; the graphics API
+    // (Vulkan is the only working one here), accuracy, filter, anti-aliasing and effects
+    // buttons are in the settings.
+    for (QWidget* widget : std::initializer_list<QWidget*>{
+             renderer_status_button, gpu_accuracy_button, filter_status_button, aa_status_button}) {
+        if (widget) {
+            widget->setVisible(false);
+        }
+    }
+#ifdef HAS_RESHADE
+    if (post_shader_status_button) {
+        post_shader_status_button->setVisible(false);
+    }
+#endif
+    // Ryujinx's bar has no multiplayer status text (the room button stays).
+    multiplayer_state->GetStatusText()->setVisible(false);
+    games_label = new QLabel();
+    games_label->setContentsMargins(4, 0, 4, 0);
+    statusBar()->insertPermanentWidget(1, games_label);
+    connect(game_list, &GameList::PopulatingCompleted, this, [this] {
+        int games = 0;
+        const QStandardItemModel* model = game_list->GetModel();
+        for (int row = 0; row < model->rowCount(); ++row) {
+            const QStandardItem* folder = model->item(row, 0);
+            if (folder == nullptr ||
+                folder->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                    GameListItemType::Favorites) {
+                continue;
+            }
+            for (int child = 0; child < folder->rowCount(); ++child) {
+                games += folder->child(child, 0)->data(GameListItem::TypeRole)
+                                 .value<GameListItemType>() == GameListItemType::Game;
+            }
+        }
+        games_label->setText(tr("%n Game(s) Loaded", "", games));
+        games_label->setMinimumWidth(games_label->fontMetrics().horizontalAdvance(
+                                         games_label->text()) +
+                                     16);
+    });
+}
+
+void MainWindow::OnConfigureControls() {
+    configure_controls_tab = true;
+    OnConfigure();
+}
+
+void MainWindow::SnapshotControls(const QString& path) {
+    Settings::SetConfiguringGlobal(true);
+    ConfigureDialog configure_dialog(this, hotkey_registry, input_subsystem.get(),
+                                     vk_device_records, *QtCommon::system, true);
+    configure_dialog.ShowControlsTab();
+    configure_dialog.resize(1100, 760);
+    configure_dialog.show();
+    QApplication::processEvents();
+    configure_dialog.grab().save(path);
+}
+
 void MainWindow::OnConfigure() {
     const auto old_theme = UISettings::values.theme;
     const bool old_discord_presence = UISettings::values.enable_discord_presence.GetValue();
@@ -3685,6 +3800,9 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnLanguageChanged);
     connect(&configure_dialog, &ConfigureDialog::ExternalContentDirsChanged, this,
             &MainWindow::OnGameListRefresh);
+    if (std::exchange(configure_controls_tab, false)) {
+        configure_dialog.ShowControlsTab();
+    }
 
     const auto result = configure_dialog.exec();
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&

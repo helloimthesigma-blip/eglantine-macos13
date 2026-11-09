@@ -36,6 +36,7 @@
 #include "yuzu/game/game_grid.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/game/game_tree.h"
+#include "yuzu/game/ryujinx_toolbar.h"
 #include "yuzu/game/search_field.h"
 #include "yuzu/main_window.h"
 #include "yuzu/util/controller_navigation.h"
@@ -54,10 +55,34 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
 
     item_model = new GameListModel(vfs, provider, play_time_manager, system, this);
 
+    if (IsRyujinxInterface()) {
+        ryujinx_toolbar = new RyujinxToolbar(this);
+        layout->addWidget(ryujinx_toolbar);
+        card_delegate = new RyujinxCardDelegate(this);
+    }
+
     SetupViews();
 
     search_field = new GameListSearchField(this);
     layout->addWidget(search_field);
+    if (ryujinx_toolbar) {
+        // The toolbar's search box replaces the filter bar.
+        search_field->setVisible(false);
+        connect(ryujinx_toolbar, &RyujinxToolbar::SearchChanged, search_field,
+                &GameListSearchField::SetFilterText);
+        connect(ryujinx_toolbar, &RyujinxToolbar::ViewModeRequested, this,
+                &GameList::ViewModeRequested);
+        connect(ryujinx_toolbar, &RyujinxToolbar::IconSizeRequested, this,
+                &GameList::IconSizeRequested);
+        connect(ryujinx_toolbar, &RyujinxToolbar::SortRequested, this,
+                [this](int column, Qt::SortOrder order) {
+                    if (m_currentView == tree_view) {
+                        tree_view->sortByColumn(column, order);
+                    } else {
+                        item_model->sort(column, order);
+                    }
+                });
+    }
 
     controller_navigation = new ControllerNavigation(system.HIDCore(), this);
 
@@ -122,18 +147,31 @@ QString GameList::GetLastFilterResultItem() const {
     return tree_view->GetLastFilterResultItem();
 }
 
+void GameList::SyncToolbar() {
+    if (ryujinx_toolbar) {
+        ryujinx_toolbar->SyncFromSettings();
+    }
+}
+
 void GameList::ClearFilter() {
+    if (ryujinx_toolbar) {
+        ryujinx_toolbar->ClearSearch();
+    }
     search_field->clear();
 }
 
 void GameList::SetFilterFocus() {
+    if (ryujinx_toolbar) {
+        ryujinx_toolbar->FocusSearch();
+        return;
+    }
     if (item_model->rowCount() > 0) {
         search_field->setFocus();
     }
 }
 
 void GameList::SetFilterVisible(bool visibility) {
-    search_field->setVisible(visibility);
+    search_field->setVisible(visibility && ryujinx_toolbar == nullptr);
 }
 
 bool GameList::IsEmpty() const {
@@ -222,7 +260,11 @@ void GameList::ResetViewMode() {
     // MainWindow switches the view right after starting the first populate; keep it disabled
     // until that finishes, as OnPopulate does for every other populate.
     m_currentView->setEnabled(!m_populating);
-    layout->insertWidget(0, m_currentView);
+    layout->insertWidget(ryujinx_toolbar ? 1 : 0, m_currentView);
+    if (card_delegate) {
+        tree_view->ApplyCardStyle(card_delegate);
+    }
+    SyncToolbar();
 
     auto view = m_currentView->viewport();
     view->installEventFilter(this);

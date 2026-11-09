@@ -65,8 +65,28 @@ void GameTree::LoadInterfaceLayout() {
     hdr->resizeSection(GameListModel::COLUMN_NAME, 840);
 }
 
+void GameTree::ApplyCardStyle(QAbstractItemDelegate* delegate) {
+    card_style = true;
+    setItemDelegateForColumn(0, delegate);
+    setHeaderHidden(true);
+    setAlternatingRowColors(false);
+    setMouseTracking(true);
+    setIndentation(14);
+    setUniformRowHeights(false);
+    header()->setStretchLastSection(false);
+    header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    UpdateColumnVisibility(qobject_cast<GameListModel*>(model()));
+    doItemsLayout();
+}
+
 void GameTree::UpdateColumnVisibility(GameListModel* model) {
     Q_UNUSED(model)
+    if (card_style) {
+        for (int column = 1; column < GameListModel::COLUMN_COUNT; ++column) {
+            setColumnHidden(column, true);
+        }
+        return;
+    }
     setColumnHidden(GameListModel::COLUMN_ADD_ONS, !UISettings::values.show_add_ons);
     setColumnHidden(GameListModel::COLUMN_FILE_TYPE, !UISettings::values.show_types);
     setColumnHidden(GameListModel::COLUMN_SIZE, !UISettings::values.show_size);

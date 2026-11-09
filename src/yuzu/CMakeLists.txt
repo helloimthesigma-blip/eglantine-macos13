@@ -161,6 +161,7 @@ add_executable(yuzu
     game/game_tree.h game/game_tree.cpp
     game/game_card.h game/game_card.cpp
     game/search_field.h game/search_field.cpp
+    game/ryujinx_toolbar.h game/ryujinx_toolbar.cpp
 
     hotkeys.cpp
     hotkeys.h
@@ -418,6 +419,10 @@ endif()
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
 target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent)
+if (APPLE AND TARGET Qt6::QOffscreenIntegrationPlugin)
+    # Interface snapshots without a display (EDEN_UI_SNAPSHOT, QT_QPA_PLATFORM=offscreen).
+    qt_import_plugins(yuzu INCLUDE Qt6::QOffscreenIntegrationPlugin)
+endif()
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(yuzu PRIVATE ZLIB::ZLIB)
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)

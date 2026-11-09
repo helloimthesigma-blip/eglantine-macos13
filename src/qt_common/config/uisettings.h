@@ -62,17 +62,13 @@ enum class Theme {
     DarkColorful,
     MidnightBlue,
     MidnightBlueColorful,
+    Ryujinx,
 };
 
-static constexpr Theme default_theme{
-#ifdef _WIN32
-    Theme::DarkColorful
-#else
-    Theme::DefaultColorful
-#endif
-};
+// eglantine-macos13: the Ryujinx-style theme by default.
+static constexpr Theme default_theme{Theme::Ryujinx};
 
-using Themes = std::array<std::pair<const char*, const char*>, 6>;
+using Themes = std::array<std::pair<const char*, const char*>, 7>;
 extern const Themes themes;
 
 struct GameDir {

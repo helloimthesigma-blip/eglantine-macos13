@@ -24,10 +24,16 @@ public:
 
     void UpdateColumnVisibility(GameListModel* model);
 
+    /// Ryujinx-style cards: one full-width column drawn by the delegate, no header.
+    void ApplyCardStyle(QAbstractItemDelegate* delegate);
+
 signals:
     void ItemExpandedChanged(const QModelIndex& item);
     void FilterResultReady(int visible, int total);
 
 private slots:
     void OnItemExpanded(const QModelIndex& item);
+
+private:
+    bool card_style{};
 };

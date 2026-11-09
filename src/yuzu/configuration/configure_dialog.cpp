@@ -121,6 +121,13 @@ ConfigureDialog::~ConfigureDialog() = default;
 
 void ConfigureDialog::SetConfiguration() {}
 
+void ConfigureDialog::ShowControlsTab() {
+    const auto items = ui->selectorList->findItems(tr("Controls"), Qt::MatchExactly);
+    if (!items.isEmpty()) {
+        ui->selectorList->setCurrentItem(items.first());
+    }
+}
+
 void ConfigureDialog::ApplyConfiguration() {
     general_tab->ApplyConfiguration();
     ui_tab->ApplyConfiguration();
