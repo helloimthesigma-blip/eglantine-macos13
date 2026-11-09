@@ -807,6 +807,11 @@ void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id
     const auto [image, is_integer] = Image(ctx, index, info);
     if (!is_integer) {
         color = ctx.OpBitcast(ctx.F32[4], color);
+        std::array<Id, 4> components;
+        for (u32 i = 0; i < 4; ++i) {
+            components[i] = ctx.FiniteOutput(ctx.OpCompositeExtract(ctx.F32[1], color, i));
+        }
+        color = ctx.OpCompositeConstruct(ctx.F32[4], components);
     }
     ctx.OpImageWrite(image, coords, color);
 }

@@ -1982,6 +1982,27 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     }
 }
 
+Id EmitContext::FiniteOutput(Id value, bool infinity_to_zero) {
+    static const bool enabled = [] {
+        const char* setting = std::getenv("EDEN_NX2_FINITE_OUTPUTS");
+        return setting == nullptr || setting[0] != '0';
+    }();
+    if (!enabled) {
+        return value;
+    }
+    const Id bits{OpBitcast(U32[1], value)};
+    const Id exponent{OpBitwiseAnd(U32[1], bits, Const(0x7f800000U))};
+    const Id non_finite{OpIEqual(U1, exponent, Const(0x7f800000U))};
+    const Id is_nan{OpLogicalAnd(U1, non_finite,
+                                 OpINotEqual(U1, OpBitwiseAnd(U32[1], bits, Const(0x007fffffU)),
+                                             u32_zero_value))};
+    const Id largest{OpBitwiseOr(U32[1], OpBitwiseAnd(U32[1], bits, Const(0x80000000U)),
+                                 Const(0x477e0000U))};
+    const Id replacement{infinity_to_zero ? u32_zero_value
+                                          : OpSelect(U32[1], is_nan, u32_zero_value, largest)};
+    return OpBitcast(F32[1], OpSelect(U32[1], non_finite, replacement, bits));
+}
+
 void EmitContext::DefineMeshEmulation() {
     AddExtension("SPV_KHR_storage_buffer_storage_class");
     const Id array_type{TypeRuntimeArray(U32[1])};

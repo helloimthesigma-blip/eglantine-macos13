@@ -502,6 +502,11 @@ private:
 
     void BindHostComputeUniformBuffers();
 
+    static constexpr u32 DYNAMIC_UNIFORM_SIZE = 0x10000;
+    /// Whether a constant buffer read at computed offsets is streamed padded with zeros.
+    [[nodiscard]] bool ZeroPadDynamicUniform(u32 used_size, u32 bound_size, bool has_host_buffer,
+                                             DAddr device_addr);
+
     void BindHostComputeStorageBuffers();
 
     void BindHostComputeTextureBuffers();

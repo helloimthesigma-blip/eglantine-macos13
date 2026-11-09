@@ -35,6 +35,8 @@
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_mesh_emulation.h"
+#include <limits>
+#include "shader_recompiler/frontend/ir/ir_emitter.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -518,7 +520,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .has_broken_spirv_subgroup_mask_vector_extract_dynamic =
             driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY &&
             device.GetDriverVersion() < VK_MAKE_VERSION(512, 672, 0),
-        .has_broken_spirv_subgroup_shuffle = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY,
+        .has_broken_spirv_subgroup_shuffle =
+            driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
+            std::getenv("EDEN_NX2_SHUFFLE_FALLBACK") != nullptr,
         .has_broken_spirv_fragment_shuffle =
             driver_id == VK_DRIVER_ID_AMD_PROPRIETARY &&
             Common::EnvGate("EGLANTINE_AMD_FRAGMENT_SHUFFLE"),
@@ -1692,6 +1696,78 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     }
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
+    // EDEN_NX2_IR_DUMP=<hash>,<dir>: writes the translated IR of that compute program to
+    // <dir>/<hash>.ir (reading a program's math without a SASS disassembler).
+    if (const char* ir_dump = std::getenv("EDEN_NX2_IR_DUMP")) {
+        const std::string_view spec{ir_dump};
+        const auto comma = spec.find(',');
+        if (comma != std::string_view::npos &&
+            spec.substr(0, comma) == fmt::format("{:016x}", key.unique_hash)) {
+            std::ofstream out{std::string{spec.substr(comma + 1)} + "/" +
+                              std::string{spec.substr(0, comma)} + ".ir"};
+            out << Shader::IR::DumpProgram(program);
+        }
+    }
+    // EDEN_NX2_NAN_SANITIZE=<hash>:<op>[,<op>...] ("all" for every F32 result): replaces NaN and
+    // infinite results of those IR opcodes in that compute program with 0, to find which
+    // operation makes a program write non-finite values.
+    // Programs the Metal compiler (macOS 13, MoltenVK) miscompiles into NaNs and infinities, which
+    // the bloom then spreads over the whole picture: Ocarina of Time's volumetric fog (key
+    // d9b1657f3a0b4bc2). Any extra instructions make it compile correctly, so its float results
+    // are sanitized like EDEN_NX2_NAN_SANITIZE=all does (the same image as without the bug).
+    static constexpr std::array<u64, 1> METAL_SANITIZED_PROGRAMS{0x75d4369f3b1f5868ULL};
+    std::string builtin_sanitize;
+    if (device.GetDriverID() == VK_DRIVER_ID_MOLTENVK &&
+        std::ranges::find(METAL_SANITIZED_PROGRAMS, key.unique_hash) !=
+            METAL_SANITIZED_PROGRAMS.end() &&
+        std::getenv("EDEN_NX2_NAN_SANITIZE") == nullptr) {
+        builtin_sanitize = fmt::format("{:016x}:all", key.unique_hash);
+    }
+    if (const char* sanitize = !builtin_sanitize.empty() ? builtin_sanitize.c_str()
+                                                         : std::getenv("EDEN_NX2_NAN_SANITIZE")) {
+        const std::string_view spec{sanitize};
+        const auto colon = spec.find(':');
+        if (colon != std::string_view::npos &&
+            spec.substr(0, colon) == fmt::format("{:016x}", key.unique_hash)) {
+            std::vector<std::string> ops;
+            for (std::string_view rest = spec.substr(colon + 1); !rest.empty();) {
+                const auto comma = rest.find(',');
+                ops.emplace_back(rest.substr(0, comma));
+                rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+            }
+            const auto wanted = [&](Shader::IR::Opcode op) {
+                const std::string_view name{Shader::IR::NameOf(op)};
+                return std::ranges::any_of(ops, [&](const std::string& o) {
+                    return o == "all" || o == name;
+                });
+            };
+            size_t count = 0;
+            for (Shader::IR::Block* const block : program.blocks) {
+                std::vector<Shader::IR::Block::iterator> targets;
+                for (auto it = block->begin(); it != block->end(); ++it) {
+                    const auto op = it->GetOpcode();
+                    if (it->Type() == Shader::IR::Type::F32 && op != Shader::IR::Opcode::Phi &&
+                        op != Shader::IR::Opcode::Identity && wanted(op)) {
+                        targets.push_back(it);
+                    }
+                }
+                for (auto it : targets) {
+                    const auto clone = block->PrependNewInst(it, *it);
+                    Shader::IR::IREmitter ir{*block, std::next(it)};
+                    const Shader::IR::F32 value{Shader::IR::Value{&*clone}};
+                    const Shader::IR::U1 bad{ir.LogicalOr(
+                        ir.FPIsNan(value),
+                        ir.FPEqual(ir.FPAbs(value),
+                                   ir.Imm32(std::numeric_limits<float>::infinity())))};
+                    const Shader::IR::Value safe{ir.Select(bad, ir.Imm32(0.0f), value)};
+                    it->ReplaceUsesWith(safe);
+                    ++count;
+                }
+            }
+            LOG_WARNING(Render_Vulkan, "NaN sanitize: {:016x} {} results of {}", key.unique_hash,
+                        count, spec.substr(colon + 1));
+        }
+    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||

@@ -1277,6 +1277,17 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             }
         }
     }
+    if constexpr (!IS_OPENGL) {
+        if (ZeroPadDynamicUniform((*channel_state->uniform_buffer_sizes)[stage][index],
+                                  binding.size, has_host_buffer, device_addr)) {
+            const std::span<u8> span =
+                runtime.BindMappedUniformBuffer(stage, binding_index, DYNAMIC_UNIFORM_SIZE);
+            device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            std::memset(span.data() + size, 0, span.size() - size);
+            channel_state->uniform_buffer_binding_sizes[stage][binding_index] = DYNAMIC_UNIFORM_SIZE;
+            return;
+        }
+    }
     const bool use_fast_buffer =
         needs_alignment_stream ||
         (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size &&
@@ -1508,6 +1519,23 @@ void BufferCache<P>::BindHostTransformFeedbackBuffers() {
     runtime.BindTransformFeedbackBuffers(host_bindings);
 }
 
+// A program that indexes a constant buffer with a computed offset can read past the bound size.
+// NVIDIA GPUs return 0 there; a host binding of the bound size reads whatever follows (on Metal,
+// no robust buffer access): Ocarina of Time's volumetric fog looped past its light array into
+// NaNs and infinities, which the bloom spread over the whole picture (the "washed out" look).
+// Such buffers are streamed as 64 KiB, the guest data followed by zeros. Only buffers the GPU
+// has not written (those are read from guest memory). EDEN_NX2_CBUF_ZERO_PAD=0 turns it off.
+template <class P>
+bool BufferCache<P>::ZeroPadDynamicUniform(u32 used_size, u32 bound_size, bool has_host_buffer,
+                                           DAddr device_addr) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_CBUF_ZERO_PAD");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled && used_size >= DYNAMIC_UNIFORM_SIZE && bound_size < DYNAMIC_UNIFORM_SIZE &&
+           has_host_buffer && !memory_tracker.IsRegionGpuModified(device_addr, bound_size);
+}
+
 template <class P>
 void BufferCache<P>::BindHostComputeUniformBuffers() {
     if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
@@ -1543,6 +1571,14 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
             (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size &&
              !memory_tracker.IsRegionGpuModified(binding.device_addr, size));
         if constexpr (!IS_OPENGL) {
+            if (ZeroPadDynamicUniform((*channel_state->compute_uniform_buffer_sizes)[index],
+                                      binding.size, has_host_buffer, binding.device_addr)) {
+                const std::span<u8> span =
+                    runtime.BindMappedUniformBuffer(0, binding_index, DYNAMIC_UNIFORM_SIZE);
+                device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);
+                std::memset(span.data() + size, 0, span.size() - size);
+                return;
+            }
             if (use_fast_buffer) {
                 const std::span<u8> span = runtime.BindMappedUniformBuffer(0, binding_index, size);
                 device_memory.ReadBlockUnsafe(binding.device_addr, span.data(), size);

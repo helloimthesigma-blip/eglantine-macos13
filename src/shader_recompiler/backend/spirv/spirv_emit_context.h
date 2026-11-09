@@ -447,6 +447,14 @@ private:
     void DefineOutputs(const IR::Program& program);
     void DefineMesh(const IR::Program& program);
     void DefineMeshEmulation();
+
+public:
+    /// A float written to a render target or image, made finite: NaN becomes 0, +-infinity the
+    /// largest R11G11B10 value (65024), as NVIDIA's conversions give. Integer bit tests, so fast
+    /// math can't drop them. Off with EDEN_NX2_FINITE_OUTPUTS=0.
+    Id FiniteOutput(Id value, bool infinity_to_zero = false);
+
+private:
 };
 
 } // namespace Shader::Backend::SPIRV

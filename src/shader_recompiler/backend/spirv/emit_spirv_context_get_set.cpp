@@ -491,7 +491,7 @@ void EmitSetFragColor(EmitContext& ctx, u32 index, u32 component, Id value) {
     const AttributeType type{ctx.runtime_info.color_output_types[index]};
     if (type == AttributeType::Float) {
         const Id pointer{ctx.OpAccessChain(ctx.output_f32, ctx.frag_color.at(index), component_id)};
-        ctx.OpStore(pointer, value);
+        ctx.OpStore(pointer, ctx.FiniteOutput(value));
     } else if (type == AttributeType::UnsignedInt) {
         const Id pointer{ctx.OpAccessChain(ctx.output_u32, ctx.frag_color.at(index), component_id)};
         ctx.OpStore(pointer, ctx.OpBitcast(ctx.U32[1], value));
