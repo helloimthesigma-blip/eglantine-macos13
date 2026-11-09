@@ -97,6 +97,9 @@ struct Values {
     Setting<bool> fullscreen{linkage, false, "fullscreen", Category::Ui};
     Setting<bool> show_filter_bar{linkage, true, "showFilterBar", Category::Ui};
     Setting<bool> show_status_bar{linkage, true, "showStatusBar", Category::Ui};
+    /// Switch 2 games run a frame ahead (EDEN_NX2_FRAMES_AHEAD=1): faster, but Ocarina of
+    /// Time's fog can flicker. Read when a game starts.
+    Setting<bool> nx2_frames_ahead{linkage, false, "nx2FramesAhead", Category::Ui};
 
     SwitchableSetting<ConfirmStop> confirm_before_stopping{linkage,
                                                            ConfirmStop::Ask_Always,

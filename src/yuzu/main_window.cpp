@@ -1652,6 +1652,18 @@ void MainWindow::ConnectMenuEvents() {
             ui->action_Configure->setText(tr("Settings..."));
             options->addAction(ui->action_Configure);
             options->addAction(controls_action);
+            options->addSeparator();
+            auto* frames_ahead_action = new QAction(tr("Run a Frame Ahead (faster, may flicker)"), this);
+            frames_ahead_action->setCheckable(true);
+            frames_ahead_action->setChecked(UISettings::values.nx2_frames_ahead.GetValue());
+            frames_ahead_action->setToolTip(
+                tr("Lets the game prepare the next frame while the GPU draws this one: about 20-30% "
+                   "faster in Ocarina of Time, but its fog can flicker. Applies when a game starts."));
+            options->setToolTipsVisible(true);
+            options->addAction(frames_ahead_action);
+            connect(frames_ahead_action, &QAction::toggled, this, [](bool checked) {
+                UISettings::values.nx2_frames_ahead.SetValue(checked);
+            });
             menuBar()->insertMenu(ui->menu_Emulation->menuAction(), options);
             ui->menu_Emulation->setTitle(tr("&Actions"));
             menuBar()->removeAction(ui->menu_Tools->menuAction());
@@ -2019,8 +2031,26 @@ bool MainWindow::SelectAndSetCurrentUser(
     return true;
 }
 
+namespace {
+// The "Run a Frame Ahead" option, as the environment variable the Switch 2 present reads; a value
+// set outside the app is left alone.
+void ApplyFramesAheadOption() {
+    static bool set_here = false;
+    if (UISettings::values.nx2_frames_ahead.GetValue()) {
+        if (std::getenv("EDEN_NX2_FRAMES_AHEAD") == nullptr || set_here) {
+            setenv("EDEN_NX2_FRAMES_AHEAD", "1", 1);
+            set_here = true;
+        }
+    } else if (set_here) {
+        unsetenv("EDEN_NX2_FRAMES_AHEAD");
+        set_here = false;
+    }
+}
+} // Anonymous namespace
+
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type, bool allow_recommended_settings_prompt) {
+    ApplyFramesAheadOption();
     if (nup_running && filename.toStdString() == nup_source_path) {
         QMessageBox::information(this, tr("Conversion in Progress"),
                                  tr("This game cannot be started while its dump is being "

@@ -74,11 +74,12 @@ void ReleaseFences(DmaPusher& dma_pusher) {
 // channel suspends; the release thread writes the semaphores as the GPU gets there, and the
 // suspended channel is checked again every millisecond. A channel still waiting after
 // ASYNC_ACQUIRE_FALLBACK waits for the GPU as before (in case its release needs that).
-// EDEN_NX2_ASYNC_ACQUIRE=0 restores the waiting acquire.
+// EDEN_NX2_ASYNC_ACQUIRE=1 enables it.
 bool AsyncAcquire() {
     static const bool enabled = [] {
+        // Off by default: it measured no gain in Ocarina of Time. EDEN_NX2_ASYNC_ACQUIRE=1.
         const char* value = std::getenv("EDEN_NX2_ASYNC_ACQUIRE");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] == '1';
     }();
     return enabled;
 }

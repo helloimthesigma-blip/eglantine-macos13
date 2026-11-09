@@ -76,13 +76,14 @@ Settings → General → UI.
 ## Performance on an M1 (8-core GPU, 16 GB)
 
 - Title screen: 60 fps.
-- Gameplay at 0.5x: about 12 fps (~83 ms per frame). 0.75x: about 9.5 fps (~108 ms). 1x: about
-  7 fps (~138 ms). 0.5x still looks clean and is the setting to use on a base M1.
+- Gameplay at 0.5x: about 8-9 fps indoors (~115 ms per frame), ~7 fps outdoors. 0.5x still looks
+  clean and is the setting to use on a base M1. Options → "Run a Frame Ahead" makes it ~20-30%
+  faster (0.5x indoors ~83 ms per frame) but OOT's fog then flickers outdoors.
 - At 1x the GPU is ~94% busy. A Metal System Trace puts ~55 ms of every frame in one pass, the main
   1440x810 scene pass, mostly three of the game's material shaders. FXAA, the scaling filter and
   post-processing effects cost almost nothing.
-- Ocarina of Time runs a frame ahead here (its CPU work overlaps the GPU's), which took 0.5x from
-  ~115 to ~80 ms per frame.
+- Running a frame ahead overlaps the game's CPU work with the GPU's; it's opt-in because the
+  game rewrites per-frame data the emulator hasn't read yet (fog flicker).
 - Memory: the process settles around 12 GB (about 5 GB is the game's own RAM). With other apps
   open, a 16 GB Mac swaps. Close what you can.
 
@@ -106,7 +107,7 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 | No `VK_EXT_mesh_shader`: mesh draws skipped (OOT: the door of Link's house, ~30 draws a frame) | Task and mesh programs run as compute shaders that write a vertex buffer, drawn by a generated vertex shader (`vk_mesh_emulation.h`) |
 | Every draw sampling the bound depth buffer ended the render pass (~95 per OOT frame) | End the pass only if it wrote depth or stencil (185 → 160 ms per frame on an M1) |
 | Washed-out, white picture with pink outlines | The volumetric fog compute program is miscompiled by Metal into NaNs and infinities, which the bloom spreads over the frame. That program's float results are sanitized on MoltenVK, and render target and image outputs are made finite as NVIDIA's conversions give |
-| CPU and GPU never overlapped (each present waited for its own frame) | OOT runs a frame ahead (`EDEN_NX2_FRAMES_AHEAD=0` waits again); unmet semaphore acquires no longer wait for the GPU to drain |
+| CPU and GPU never overlap (each present waits for its own frame) | Opt-in: Options → Run a Frame Ahead (`EDEN_NX2_FRAMES_AHEAD=1`), faster but OOT's fog flickers |
 
 ## Known issues
 
