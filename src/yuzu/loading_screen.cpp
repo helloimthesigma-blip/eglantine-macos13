@@ -18,6 +18,7 @@
 #include "core/loader/loader.h"
 #include "ui_loading_screen.h"
 #include "video_core/rasterizer_interface.h"
+#include "yuzu/game/ryujinx_toolbar.h"
 #include "yuzu/loading_screen.h"
 
 // Mingw seems to not have QMovie at all. If QMovie is missing then use a single frame instead of an
@@ -53,11 +54,37 @@ QProgressBar::chunk {
   background-color: #ff3c28;
 })";
 
+// Ryujinx-style interface: a dark screen with a thin accent bar instead of the red and blue one.
+constexpr char PROGRESSBAR_STYLE_RYUJINX[] = R"(
+QProgressBar {
+  background-color: #3a3a3a;
+  border: none;
+  border-radius: 3px;
+  max-height: 6px;
+  min-height: 6px;
+}
+QProgressBar::chunk {
+  background-color: #4ca2ff;
+  border-radius: 3px;
+})";
+
 LoadingScreen::LoadingScreen(QWidget* parent)
     : QWidget(parent), ui(std::make_unique<Ui::LoadingScreen>()),
       previous_stage(VideoCore::LoadCallbackStage::Complete) {
     ui->setupUi(this);
     setMinimumSize(Layout::MinimumSize::Width, Layout::MinimumSize::Height);
+    if (IsRyujinxInterface()) {
+        ryujinx_style = true;
+        setStyleSheet(QStringLiteral("background-color: #1f1f1f;"));
+        const QString text_style =
+            QStringLiteral("background-color: #1f1f1f; color: #ffffff; font-size: 15px;");
+        ui->stage->setStyleSheet(text_style);
+        ui->value->setStyleSheet(
+            QStringLiteral("background-color: #1f1f1f; color: rgba(255,255,255,160); font-size: 13px;"));
+        ui->banner->setStyleSheet(QStringLiteral("background-color: #1f1f1f;"));
+        ui->progress_bar->setTextVisible(false);
+        ui->progress_bar->setStyleSheet(QString::fromUtf8(PROGRESSBAR_STYLE_RYUJINX));
+    }
 
     // Create a fade out effect to hide this loading screen widget.
     // When fading opacity, it will fade to the parent widgets background color, which is why we
@@ -134,7 +161,8 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
     const auto now = steady_clock::now();
     // reset the timer if the stage changes
     if (stage != previous_stage) {
-        ui->progress_bar->setStyleSheet(QString::fromUtf8(progressbar_style[stage]));
+        ui->progress_bar->setStyleSheet(QString::fromUtf8(
+            ryujinx_style ? PROGRESSBAR_STYLE_RYUJINX : progressbar_style[stage]));
         // Hide the progress bar during the prepare stage
         if (stage == VideoCore::LoadCallbackStage::Prepare) {
             ui->progress_bar->hide();

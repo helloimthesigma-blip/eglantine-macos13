@@ -601,6 +601,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                                if (const char* controls = std::getenv("EDEN_UI_SNAPSHOT_CONTROLS")) {
                                    SnapshotControls(QString::fromUtf8(controls));
                                }
+                               if (const char* loading = std::getenv("EDEN_UI_SNAPSHOT_LOADING")) {
+                                   loading_screen->resize(1280, 720);
+                                   loading_screen->OnLoadProgress(
+                                       VideoCore::LoadCallbackStage::Build, 120, 400);
+                                   loading_screen->grab().save(QString::fromUtf8(loading));
+                               }
                                std::_Exit(0);
                            });
     }
