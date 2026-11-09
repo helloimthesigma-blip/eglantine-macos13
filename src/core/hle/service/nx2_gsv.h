@@ -1773,9 +1773,15 @@ private:
         constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
         int frames_ahead = frames_ahead_setting;
         const u64 app_program_id = system.GetApplicationProcessProgramID();
-        if (frames_ahead == -1 && (app_program_id == DonkeyKongBananzaProgramId ||
-                                   app_program_id == OcarinaOfTimeProgramId)) {
+        if (frames_ahead == -1 && app_program_id == DonkeyKongBananzaProgramId) {
             frames_ahead = 0;
+        }
+        // eglantine-macos13: Ocarina of Time runs a frame ahead. Waiting for each frame kept the
+        // CPU and GPU from overlapping (M1, 0.5x: 115 -> 80 ms per frame, 1x: 160 -> 138 ms), and
+        // ~1,800 frames burst-captured indoors and in Kokiri Forest, still and panning, showed no
+        // flash. EDEN_NX2_FRAMES_AHEAD=0 waits for each frame again.
+        if (frames_ahead == -1 && app_program_id == OcarinaOfTimeProgramId) {
+            frames_ahead = 1;
         }
         const auto entered = std::chrono::steady_clock::now();
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {

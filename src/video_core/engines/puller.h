@@ -80,6 +80,7 @@ public:
         std::chrono::steady_clock::time_point since;
         std::chrono::steady_clock::time_point last_fences; ///< When it last released fences
         bool reported;
+        bool waited_for_gpu{}; ///< The asynchronous acquire's fallback ran (puller.cpp)
 
         [[nodiscard]] bool Matches(u32 current) const;
     };

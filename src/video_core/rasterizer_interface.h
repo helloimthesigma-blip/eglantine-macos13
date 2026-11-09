@@ -91,6 +91,12 @@ public:
     /// Release all pending fences.
     virtual void ReleaseFences(bool force = true) = 0;
 
+    /// Submits the pending fences without waiting for them: their operations run as the host
+    /// GPU reaches them. By default this waits, like ReleaseFences.
+    virtual void SubmitPendingFences() {
+        ReleaseFences(true);
+    }
+
     /// Notify rasterizer that all caches should be flushed to Switch memory
     virtual void FlushAll() = 0;
 

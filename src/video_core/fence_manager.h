@@ -137,6 +137,17 @@ public:
         SignalFence(std::move(func));
     }
 
+    /// A fence after everything queued, submitted but not waited for (the release thread runs
+    /// the operations when the host GPU gets there). Waits without a release thread.
+    void SubmitPendingFences() {
+        if constexpr (!can_async_check) {
+            TryReleasePendingFences<true>();
+        } else {
+            SignalFence([] {});
+            SubmitDeferred();
+        }
+    }
+
     void WaitPendingFences([[maybe_unused]] bool force) {
         if constexpr (!can_async_check) {
             TryReleasePendingFences<true>();

@@ -1769,6 +1769,10 @@ void RasterizerVulkan::ReleaseFences(bool force) {
     fence_manager.WaitPendingFences(force);
 }
 
+void RasterizerVulkan::SubmitPendingFences() {
+    fence_manager.SubmitPendingFences();
+}
+
 void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
                                                 VideoCommon::CacheType which) {
     if (Settings::IsGPULevelHigh()) {

@@ -68,6 +68,27 @@ void ReleaseFences(DmaPusher& dma_pusher) {
         [rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
 }
 
+// A semaphore acquire that is not met yet used to wait for the host GPU to finish everything
+// queued, then suspend the channel. The host GPU then idles until the guest submits again; on an
+// M1 that was ~40% of the GPU thread's time. Now the pending fences are only submitted and the
+// channel suspends; the release thread writes the semaphores as the GPU gets there, and the
+// suspended channel is checked again every millisecond. A channel still waiting after
+// ASYNC_ACQUIRE_FALLBACK waits for the GPU as before (in case its release needs that).
+// EDEN_NX2_ASYNC_ACQUIRE=0 restores the waiting acquire.
+bool AsyncAcquire() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_ASYNC_ACQUIRE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+constexpr auto ASYNC_ACQUIRE_FALLBACK = std::chrono::milliseconds{50};
+
+void SubmitPendingFences(DmaPusher& dma_pusher) {
+    VideoCommon::GpuSplit::Get().Run(
+        [rasterizer = dma_pusher.rasterizer] { rasterizer->SubmitPendingFences(); });
+}
+
 } // Anonymous namespace
 
 bool Puller::PendingAcquire::Matches(u32 current) const {
@@ -110,6 +131,17 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
                              ? Settings::IsGPULevelHigh()
                              : Settings::IsGPUFenceBehaviorBalanced() ||
                                    Settings::IsGPUFenceBehaviorAccurate();
+    if (AsyncAcquire() && !pending_acquire->waited_for_gpu &&
+        std::chrono::steady_clock::now() - pending_acquire->since >= ASYNC_ACQUIRE_FALLBACK) {
+        // The release has not come from the GPU's own progress: wait for the GPU once, as the
+        // acquire did before.
+        pending_acquire->waited_for_gpu = true;
+        ReleaseFences(dma_pusher);
+        if (Nx2SemaphoreWaiters::Get().Latched(this) ||
+            pending_acquire->Matches(ReadSemaphoreWord(dma_pusher, pending_acquire->address))) {
+            return true;
+        }
+    }
     if (const auto now = std::chrono::steady_clock::now();
         delayed && now - pending_acquire->last_fences >= std::chrono::milliseconds{1}) {
         pending_acquire->last_fences = now;
@@ -286,7 +318,11 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address)) {
             waiters.Add(this, *device, acquire.value, acquire.operation);
         }
-        ReleaseFences(dma_pusher);
+        if (AsyncAcquire()) {
+            SubmitPendingFences(dma_pusher);
+        } else {
+            ReleaseFences(dma_pusher);
+        }
         if (!waiters.Latched(this) && !acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             pending_acquire = acquire;
             dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
