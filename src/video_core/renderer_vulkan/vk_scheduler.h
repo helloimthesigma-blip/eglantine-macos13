@@ -384,6 +384,7 @@ private:
     std::unique_ptr<GpuTiming> gpu_timing;
     bool depth_stencil_written{};
     u32 timed_draws{};
+    u32 timed_pass_count{};
     u64 timed_vs{};
     u64 timed_ps{};
     bool compute_writes_pending{};

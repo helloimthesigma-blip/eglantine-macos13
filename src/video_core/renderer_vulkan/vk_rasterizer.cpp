@@ -611,6 +611,14 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
             scheduler.NoteDepthStencilWrite();
         }
     }
+    // EDEN_NX2_GPU_TIMING=3: one render pass per draw, to time draws in a GPU trace.
+    static const bool pass_per_draw = [] {
+        const char* value = std::getenv("EDEN_NX2_GPU_TIMING");
+        return value != nullptr && value[0] == '3';
+    }();
+    if (pass_per_draw) {
+        scheduler.RequestOutsideRenderPassOperationContext();
+    }
     if (diag_query >= 0) {
         scheduler.Record([pool = **g_diag_pool, diag_query](vk::CommandBuffer cmdbuf) {
             cmdbuf.EndQuery(pool, static_cast<u32>(diag_query));
@@ -1455,9 +1463,12 @@ void RasterizerVulkan::DispatchCompute() {
             }
             if (timing) {
                 timing->Begin(cmdbuf);
+                std::array<float, 4> color{1.0f, 0.6f, 0.2f, 1.0f};
+                cmdbuf.BeginDebugUtilsLabelEXT(label.c_str(), color);
             }
             cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
             if (timing) {
+                cmdbuf.EndDebugUtilsLabelEXT();
                 timing->End(cmdbuf, std::string{label});
             }
         });
@@ -1482,9 +1493,12 @@ void RasterizerVulkan::DispatchCompute() {
         }
         if (timing) {
             timing->Begin(cmdbuf);
+            std::array<float, 4> color{1.0f, 0.6f, 0.2f, 1.0f};
+            cmdbuf.BeginDebugUtilsLabelEXT(label.c_str(), color);
         }
         cmdbuf.Dispatch(dim[0], dim[1], dim[2]);
         if (timing) {
+            cmdbuf.EndDebugUtilsLabelEXT();
             timing->End(cmdbuf, std::string{label});
         }
     });

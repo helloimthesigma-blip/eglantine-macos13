@@ -198,8 +198,9 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     timed_ps = 0;
     // A cleared attachment is written by the load operation (deferred clears).
     depth_stencil_written = clear_value_count != 0;
+    const u32 timing_pass = gpu_timing ? ++timed_pass_count : 0;
     Record([renderpass, framebuffer_handle, render_area, values, clear_value_count,
-            after_compute, timing = gpu_timing.get()](vk::CommandBuffer cmdbuf) {
+            after_compute, timing = gpu_timing.get(), timing_pass](vk::CommandBuffer cmdbuf) {
         const VkRenderPassBeginInfo renderpass_bi{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = nullptr,
@@ -227,6 +228,10 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
         }
         if (timing) {
             timing->Begin(cmdbuf);
+            // The pass number, matched to the "Render pass #n" log line in a GPU trace.
+            const std::string label = fmt::format("RP#{}", timing_pass);
+            std::array<float, 4> color{0.3f, 0.6f, 1.0f, 1.0f};
+            cmdbuf.BeginDebugUtilsLabelEXT(label.c_str(), color);
         }
         cmdbuf.BeginRenderPass(renderpass_bi, VK_SUBPASS_CONTENTS_INLINE);
     });
@@ -589,6 +594,10 @@ void Scheduler::EndRenderPass()
             timing_label = fmt::format("RP {}x{} images {} draws {:<4} vs {:016x} ps {:016x}",
                                        state.render_area.width, state.render_area.height,
                                        num_renderpass_images, timed_draws, timed_vs, timed_ps);
+            if (const char* log = std::getenv("EDEN_NX2_GPU_TIMING");
+                log && (log[0] == '2' || log[0] == '3')) {
+                LOG_INFO(Render_Vulkan, "Render pass #{}: {}", timed_pass_count, timing_label);
+            }
         }
         Record([num_images = num_renderpass_images,
                        images = renderpass_images,
@@ -633,6 +642,7 @@ void Scheduler::EndRenderPass()
             }
             cmdbuf.EndRenderPass();
             if (timing) {
+                cmdbuf.EndDebugUtilsLabelEXT();
                 timing->End(cmdbuf, std::string{timing_label});
             }
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
