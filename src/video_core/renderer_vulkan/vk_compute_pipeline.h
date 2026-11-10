@@ -61,6 +61,25 @@ public:
         return static_cast<bool>(pipeline);
     }
 
+    /// Whether the program can write memory other than images: storage buffers, image buffers or
+    /// global memory (what the guest CPU may read back; frame skip never drops these).
+    [[nodiscard]] bool WritesBuffers() const noexcept {
+        if (info.stores_global_memory || info.uses_global_increment || info.uses_global_decrement) {
+            return true;
+        }
+        for (const auto& desc : info.storage_buffers_descriptors) {
+            if (desc.is_written) {
+                return true;
+            }
+        }
+        for (const auto& desc : info.image_buffer_descriptors) {
+            if (desc.is_written) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     [[nodiscard]] u64 ShaderHash() const noexcept {
         return shader_hash;
     }

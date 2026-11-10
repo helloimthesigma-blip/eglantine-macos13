@@ -181,6 +181,10 @@ private:
     void PrepareDraw(bool is_indexed, Func&&);
     bool TryNx2IndirectReset();
 
+    /// Frame skip for a draw (kind 1) or clear (2): false when the frame is drawn or the target is new.
+
+    bool SkipFrameDraw(u32 kind);
+
     void FlushWork();
 
     /// Records the copies of the command list pages the work just recorded wrote and submits, so

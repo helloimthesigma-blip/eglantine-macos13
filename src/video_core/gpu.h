@@ -34,6 +34,10 @@ namespace Tegra {
 /// Whether this skipped frame also drops its large compute dispatches (not on the frame before a
 /// drawn one).
 [[nodiscard]] bool Nx2SkippingFrameCompute();
+/// Frames ended so far (GPU thread), for the rasterizer to notice frame boundaries.
+[[nodiscard]] u64 Nx2FrameNumber();
+/// Counts a draw of the current frame (frame skip only skips busy 3D frames).
+void Nx2CountDraw();
 /// Frame skip as set in the app (-1: EDEN_NX2_FRAME_SKIP decides). Takes effect at the next frame.
 void Nx2SetFrameSkip(int frames);
 /// Whether the frame being composited was skipped: it is not shown (the last drawn one stays).

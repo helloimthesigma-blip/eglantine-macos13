@@ -754,6 +754,55 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 namespace {
+/// Frame skip, Voland's rule: a skipped frame still runs work on targets the last drawn frame did
+/// not touch (one-time work such as a glyph atlas or a texture made once), and only drops the work
+/// that every frame redoes. Keys: draws by colour target 0 and depth target, compute by program.
+struct FrameSkipTargets {
+    // The last few drawn frames: games alternate between pairs or triples of targets (history
+    // buffers), so a drawn frame every few frames doesn't always see the same ones.
+    static constexpr size_t History = 4;
+    u64 frame = ~u64{0};
+    bool frame_drawn = false;
+    std::unordered_set<u64> current;
+    std::array<std::unordered_set<u64>, History> drawn;
+    size_t next = 0;
+
+    /// Call before each draw, clear or dispatch: rotates the sets at a frame boundary.
+    void Sync() {
+        const u64 now = Tegra::Nx2FrameNumber();
+        if (now == frame) {
+            return;
+        }
+        if (frame_drawn) {
+            drawn[next].swap(current);
+            next = (next + 1) % History;
+        }
+        current.clear();
+        frame = now;
+        frame_drawn = !Tegra::Nx2SkippingFrameWork();
+    }
+    void Note(u64 key) {
+        if (frame_drawn) {
+            current.insert(key);
+        }
+    }
+    [[nodiscard]] bool SeenLastDrawn(u64 key) const {
+        for (const auto& set : drawn) {
+            if (set.contains(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+FrameSkipTargets g_frame_skip_targets;
+
+u64 DrawTargetKey(const Tegra::Engines::Maxwell3D::Regs& regs) {
+    const u64 color = regs.rt[0].Address();
+    const u64 depth = regs.zeta_enable != 0 ? regs.zeta.Address() : 0;
+    return color * 0x9E3779B97F4A7C15ULL ^ depth;
+}
+
 /// Frame skip: which work a skipped frame drops (EDEN_NX2_FRAME_SKIP_WORK, bits: 1 draws, 2 clears,
 /// 4 compute; default all).
 bool SkipFrameWork(u32 kind) {
@@ -772,9 +821,43 @@ bool SkipFrameWork(u32 kind) {
 }
 } // Anonymous namespace
 
+bool RasterizerVulkan::SkipFrameDraw(u32 kind) {
+    if (kind == 1) {
+        Tegra::Nx2CountDraw();
+    }
+    g_frame_skip_targets.Sync();
+    const u64 key = DrawTargetKey(maxwell3d->regs);
+    g_frame_skip_targets.Note(key);
+    if (!SkipFrameWork(kind)) {
+        return false;
+    }
+    // Opt-in (EDEN_NX2_FRAME_SKIP_NEW_TARGETS=1): OoT updates some targets round-robin, one every
+    // few frames, which lines up with the skipped frames and ran them every time (~40% slower).
+    static const bool new_targets = [] {
+        const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_TARGETS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!new_targets || g_frame_skip_targets.SeenLastDrawn(key)) {
+        return true;
+    }
+    // EDEN_NX2_FRAME_SKIP_LOG_NEW=1: log targets a skipped frame draws because they are new.
+    static const bool log_new = std::getenv("EDEN_NX2_FRAME_SKIP_LOG_NEW") != nullptr;
+    if (log_new) {
+        static u32 logged = 0;
+        if (logged++ < 400) {
+            const auto& regs = maxwell3d->regs;
+            LOG_INFO(Render_Vulkan, "Frame skip runs {} on new target: frame {} rt0 {:#x} {}x{} fmt {:#x} zeta {:#x} {}",
+                     kind == 1 ? "draw" : "clear", Tegra::Nx2FrameNumber(), regs.rt[0].Address(),
+                     regs.rt[0].width, regs.rt[0].height, static_cast<u32>(regs.rt[0].format),
+                     regs.zeta_enable != 0 ? regs.zeta.Address() : 0, regs.zeta_enable);
+        }
+    }
+    return false;
+}
+
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
-    if (SkipFrameWork(1)) {
+    if (SkipFrameDraw(1)) {
         return;
     }
     {
@@ -1027,7 +1110,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 
 void RasterizerVulkan::DrawIndirect() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
-    if (SkipFrameWork(1)) {
+    if (SkipFrameDraw(1)) {
         return;
     }
     const auto& params = maxwell3d->draw_manager.indirect_state;
@@ -1163,7 +1246,7 @@ void RasterizerVulkan::DrawTexture() {
 
 void RasterizerVulkan::Clear(u32 layer_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
-    if (SkipFrameWork(2)) {
+    if (SkipFrameDraw(2)) {
         return;
     }
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
@@ -1409,7 +1492,38 @@ void RasterizerVulkan::DispatchCompute() {
             const ComputePipeline* const skip_pipeline =
                 pipeline_cache.CurrentComputePipeline(skip_native_key);
             const u64 hash = skip_pipeline != nullptr ? skip_pipeline->ShaderHash() : 0;
-            if (std::find(keep.begin(), keep.end(), hash) == keep.end()) {
+            // Programs that write buffers always run: the game may read their results on the CPU
+            // (dropping them while OoT loaded an area made it jump through a garbage pointer).
+            // Image work (post-processing, fog volumes) is redone by the next drawn frame.
+            // Also the water collision height map (OoT), an image the game's CPU reads back.
+            constexpr u64 WaterCollisionHeightMapKey = 0x6e0ae200ee9aa220ULL;
+            // EDEN_NX2_FRAME_SKIP_KEEP_BUFFERS=1 also keeps programs that write buffers (off: OoT's
+            // lighting turned purple from fresh buffers built over stale images, and ran slower).
+            static const bool keep_buffers = [] {
+                const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_KEEP_BUFFERS");
+                return value != nullptr && value[0] == '1';
+            }();
+            const bool writes_buffers = skip_pipeline == nullptr ||
+                                        (keep_buffers && skip_pipeline->WritesBuffers()) ||
+                                        skip_native_key == WaterCollisionHeightMapKey;
+            if (writes_buffers && skip_pipeline != nullptr) {
+                static std::mutex kept_mutex;
+                static std::unordered_set<u64> kept;
+                std::scoped_lock kept_lock{kept_mutex};
+                if (kept.insert(hash).second) {
+                    LOG_INFO(Render_Vulkan, "Frame skip keeps compute {:016x} (writes buffers): {}x{}x{} groups of {}x{}x{}",
+                             hash, launch.grid_dim_x, launch.grid_dim_y, launch.grid_dim_z,
+                             launch.block_dim_x, launch.block_dim_y, launch.block_dim_z);
+                }
+            }
+            // Programs the last drawn frame didn't run are one-time work: they run.
+            g_frame_skip_targets.Sync();
+            static const bool new_programs = [] {
+                const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_TARGETS");
+                return value != nullptr && value[0] == '1';
+            }();
+            const bool every_frame = !new_programs || g_frame_skip_targets.SeenLastDrawn(hash ^ 0xC0C0C0C0ULL);
+            if (!writes_buffers && every_frame && std::find(keep.begin(), keep.end(), hash) == keep.end()) {
                 static std::mutex seen_mutex;
                 static std::unordered_set<u64> seen;
                 std::scoped_lock seen_lock{seen_mutex};
@@ -1436,6 +1550,8 @@ void RasterizerVulkan::DispatchCompute() {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");
         return;
     }
+    g_frame_skip_targets.Sync();
+    g_frame_skip_targets.Note(pipeline->ShaderHash() ^ 0xC0C0C0C0ULL);
     std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
     // Command list pages the dispatch writes are copied for the split's front right after it.
     buffer_cache.Nx2CollectListCopies(true);

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -51,6 +52,8 @@ std::atomic<bool> g_nx2_skip_frame_work{};
 std::atomic<bool> g_nx2_skip_frame_compute{};
 std::atomic<bool> g_nx2_shown_frame_skipped{};
 std::atomic<int> g_nx2_frame_skip_override{-1};
+std::atomic<u64> g_nx2_frame_number{};
+std::atomic<u32> g_nx2_frame_draws{};
 
 /// Called on the GPU thread at each composite. Returns whether the frame that just ended was
 /// skipped (so it isn't shown), and decides whether the next one is.
@@ -78,7 +81,26 @@ bool Nx2EndFrame() {
     }
     const bool was_skipped = g_nx2_skip_frame_work.load(std::memory_order_relaxed);
     ++frames;
-    const auto drawn = [&](u64 frame) { return skip == 0 || (frame % (skip + 1)) == 0; };
+    g_nx2_frame_number.store(frames, std::memory_order_relaxed);
+    // Only in busy 3D frames: loading screens and menus draw little, and there the game reads
+    // back what the GPU made (OoT once crashed loading an area with frame skip on). Frames with
+    // fewer than EDEN_NX2_FRAME_SKIP_MIN_DRAWS draws (300) are all drawn.
+    static const u32 min_draws = [] {
+        const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_MIN_DRAWS");
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 300U;
+    }();
+    const u32 frame_draws = g_nx2_frame_draws.exchange(0, std::memory_order_relaxed);
+    static const bool log_draws = std::getenv("EDEN_NX2_FRAME_SKIP_LOG_DRAWS") != nullptr;
+    if (log_draws && frames % 20 == 0) {
+        LOG_INFO(HW_GPU, "frame {} draws {}", frames, frame_draws);
+    }
+    // Most of the last 32 frames busy (gameplay has the odd frame with a handful of draws).
+    static u32 busy_history = 0;
+    busy_history = (busy_history << 1) | (frame_draws >= min_draws ? 1U : 0U);
+    const bool busy = std::popcount(busy_history) >= 20;
+    const auto drawn = [&](u64 frame) {
+        return skip == 0 || !busy || (frame % (skip + 1)) == 0;
+    };
     g_nx2_skip_frame_work.store(!drawn(frames), std::memory_order_relaxed);
     // EDEN_NX2_FRAME_SKIP_PREP=1: the frame before a drawn one runs its compute work too (the
     // drawn frame reads what the previous one computed). Off: in OoT it cost ~30% of the game
@@ -95,6 +117,14 @@ bool Nx2EndFrame() {
 
 bool Nx2SkippingFrameWork() {
     return g_nx2_skip_frame_work.load(std::memory_order_relaxed);
+}
+
+void Nx2CountDraw() {
+    g_nx2_frame_draws.fetch_add(1, std::memory_order_relaxed);
+}
+
+u64 Nx2FrameNumber() {
+    return g_nx2_frame_number.load(std::memory_order_relaxed);
 }
 
 bool Nx2SkippingFrameCompute() {
