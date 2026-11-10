@@ -52,6 +52,7 @@
 #endif // ^^^ POSIX ^^^
 
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <cstdio>
 #include <unordered_map>
@@ -661,6 +662,7 @@ public:
                     (((host_offset + offset) / GuestPage + 1) << SubShift) | bits;
             }
             RefreshSplit(virtual_offset, length, false);
+            LogSplitStats();
             return;
         }
         // Intersect the range with our address space.
@@ -829,6 +831,42 @@ private:
         }
         const int prot = ((perms & SubRead) ? PROT_READ : 0) | ((perms & SubWrite) ? PROT_WRITE : 0);
         return std::make_pair(static_cast<size_t>((first - 1) * GuestPage), prot);
+    }
+
+    /// EDEN_FASTMEM_16K_STATS=1: every 10 s (on a Map), how many host pages with guest memory are
+    /// mapped, why the others aren't, and how often each kind of misfit happens.
+    void LogSplitStats() {
+        static const bool enabled = std::getenv("EDEN_FASTMEM_16K_STATS") != nullptr;
+        if (!enabled) {
+            return;
+        }
+        static auto last = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last < std::chrono::seconds{10}) {
+            return;
+        }
+        last = now;
+        u64 mapped = 0, partial = 0, misaligned = 0, scattered = 0;
+        for (const auto& [page, subs] : split_table) {
+            if (MappableHostPage(subs)) {
+                ++mapped;
+                continue;
+            }
+            bool all = true;
+            for (const u64 entry : subs) {
+                all &= entry != 0;
+            }
+            if (!all) {
+                ++partial;
+            } else if ((((subs[0] >> SubShift) - 1) * GuestPage) % HostPage16K != 0) {
+                ++misaligned;
+            } else {
+                ++scattered;
+            }
+        }
+        LOG_INFO(HW_Memory, "fastmem 16K: {} host pages mapped ({} MiB); not mapped: {} partly "
+                 "mapped, {} backing not 16K-aligned, {} backing not contiguous",
+                 mapped, mapped * HostPage16K >> 20, partial, misaligned, scattered);
     }
 
     /// Brings the host pages under [virtual_offset, +length) in line with the table, coalescing

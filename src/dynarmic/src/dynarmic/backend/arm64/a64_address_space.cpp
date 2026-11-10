@@ -582,7 +582,7 @@ void A64AddressSpace::EmitPrelude() {
 }
 
 EmitConfig A64AddressSpace::GetEmitConfig() {
-    return EmitConfig{
+    EmitConfig emit_config{
         .optimizations = conf.unsafe_optimizations ? conf.optimizations : conf.optimizations & all_safe_optimizations,
 
         .hook_isb = conf.hook_isb,
@@ -632,6 +632,16 @@ EmitConfig A64AddressSpace::GetEmitConfig() {
 
         .very_verbose_debugging_output = conf.very_verbose_debugging_output,
     };
+    // DYNARMIC_INLINE_EXCLUSIVES=0: exclusive stores always go through the callbacks.
+    static const bool inline_exclusives = [] {
+        const char* value = std::getenv("DYNARMIC_INLINE_EXCLUSIVES");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (inline_exclusives) {
+        emit_config.global_monitor = conf.global_monitor;
+        emit_config.processor_id = conf.processor_id;
+    }
+    return emit_config;
 }
 
 void A64AddressSpace::RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo&) {

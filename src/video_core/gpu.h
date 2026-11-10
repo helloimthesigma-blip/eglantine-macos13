@@ -31,6 +31,9 @@ namespace Tegra {
 /// game's commands still run (memory writes, semaphores, fences) but draws, clears and compute
 /// dispatches are dropped, and the frame isn't shown. Set by the GPU thread at each composite.
 [[nodiscard]] bool Nx2SkippingFrameWork();
+/// Whether this skipped frame also drops its large compute dispatches (not on the frame before a
+/// drawn one).
+[[nodiscard]] bool Nx2SkippingFrameCompute();
 /// Frame skip as set in the app (-1: EDEN_NX2_FRAME_SKIP decides). Takes effect at the next frame.
 void Nx2SetFrameSkip(int frames);
 /// Whether the frame being composited was skipped: it is not shown (the last drawn one stays).

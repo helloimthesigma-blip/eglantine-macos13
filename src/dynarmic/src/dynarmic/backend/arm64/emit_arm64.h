@@ -41,6 +41,10 @@ enum class Cond;
 enum class Opcode;
 }  // namespace Dynarmic::IR
 
+namespace Dynarmic {
+class ExclusiveMonitor;
+}  // namespace Dynarmic
+
 namespace Dynarmic::Backend::Arm64 {
 
 struct EmitContext;
@@ -163,6 +167,11 @@ struct EmitConfig {
 
     // Fast dispatch: a direct-mapped table of (location, code) for indirect branches, or 0
     u64 fast_dispatch_table_pointer = 0;
+
+    // With OptimizationFlag::Unsafe_IgnoreGlobalMonitor, exclusive stores compare and swap inline
+    // against this processor's reservation in the monitor (A64; null: through the callbacks)
+    ExclusiveMonitor* global_monitor = nullptr;
+    std::size_t processor_id = 0;
 
     // Fastmem
     std::optional<u64> fastmem_pointer;

@@ -366,8 +366,16 @@ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
         static const bool stats = std::getenv("DYNARMIC_FASTMEM_STATS") != nullptr;
         if (stats) {
             static std::atomic<u64> faults{};
-            if ((faults.fetch_add(1, std::memory_order_relaxed) & 255) == 0) {
-                fmt::print("dynarmic: {} fastmem faults so far\n", faults.load());
+            const u64 n = faults.fetch_add(1, std::memory_order_relaxed);
+            if ((n & 4095) == 0) {
+                // The location and instruction of this fault, the block's entry, and whether that
+                // access was already marked not to use fastmem (a repeat).
+                const auto& [location, index] = patch->marker;
+                fmt::print("dynarmic: {} fastmem faults so far; this one at location {:#x} inst {} "
+                           "block {} recompile {} already marked {} live block {}\n",
+                           n + 1, location.Value(), index, fmt::ptr(entry_point), patch->recompile,
+                           !fastmem_manager.ShouldFastmem(patch->marker),
+                           Get(location) == entry_point);
                 std::fflush(stdout);
             }
         }

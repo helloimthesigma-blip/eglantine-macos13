@@ -19,6 +19,7 @@
 #include "dynarmic/backend/arm64/emit_arm64.h"
 #include "dynarmic/backend/arm64/emit_context.h"
 #include "dynarmic/backend/arm64/fastmem.h"
+#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/arm64/fpsr_manager.h"
 #include "dynarmic/backend/arm64/reg_alloc.h"
 #include "dynarmic/ir/acc_type.h"
@@ -642,6 +643,87 @@ void FastmemEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::I
     code.l(*end);
 }
 
+// Exclusive store as an inline compare-and-swap on the fastmem address, against this processor's
+// reservation in the global monitor (Unsafe_IgnoreGlobalMonitor: what the callback path does, without
+// its calls). A fault on the CAS takes the callback path, which then fails the store once (the
+// reservation is already cleared) and the guest retries with that access recompiled without fastmem.
+template<std::size_t bitsize>
+void FastmemEmitExclusiveWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, DoNotFastmemMarker marker) {
+    static_assert(bitsize <= 64);
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    ctx.reg_alloc.PrepareForCall({}, args[1], args[2]);  // X1: vaddr, X2: value
+    const bool ordered = IsOrdered(args[3].GetImmediateAccType());
+
+    SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
+
+    if (ordered) {
+        code.DMB(oaknut::BarrierOp::ISH);
+    }
+    code.MOV(W0, 1);
+    code.LDRB(Wscratch0, Xstate, ctx.conf.state_exclusive_state_offset);
+    code.CBZ(Wscratch0, *end);
+    code.STRB(WZR, Xstate, ctx.conf.state_exclusive_state_offset);
+
+    code.MOV(Xscratch1, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(ctx.conf.global_monitor, ctx.conf.processor_id)));
+    code.LDR(Xscratch0, Xscratch1);
+    code.CMP(Xscratch0, X1);
+    code.B(NE, *end);
+    code.MOV(Xscratch0, u64{0xDEAD'DEAD'DEAD'DEADull});
+    code.STR(Xscratch0, Xscratch1);
+
+    code.MOV(Xscratch1, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(ctx.conf.global_monitor, ctx.conf.processor_id)));
+    code.LDR(X3, Xscratch1);
+    if constexpr (bitsize == 8) {
+        code.UXTB(W3, W3);
+    } else if constexpr (bitsize == 16) {
+        code.UXTH(W3, W3);
+    } else if constexpr (bitsize == 32) {
+        code.MOV(W3, W3);
+    }
+    code.MOV(X4, X3);
+
+    const auto [Xbase, Xoffset] = FastmemEmitVAddrLookup<bitsize>(code, ctx, X1, fallback);
+    code.ADD(Xscratch0, Xbase, Xoffset);
+    const CodePtr fastmem_location = code.xptr<CodePtr>();
+    if constexpr (bitsize == 8) {
+        code.CASALB(W3, W2, Xscratch0);
+    } else if constexpr (bitsize == 16) {
+        code.CASALH(W3, W2, Xscratch0);
+    } else if constexpr (bitsize == 32) {
+        code.CASAL(W3, W2, Xscratch0);
+    } else {
+        code.CASAL(X3, X2, Xscratch0);
+    }
+    code.CMP(X3, X4);
+    code.CSET(W0, NE);
+    if (ordered) {
+        code.DMB(oaknut::BarrierOp::ISH);
+    }
+
+    ctx.deferred_emits.emplace_back([&code, &ctx, inst, marker, ordered, fallback, end, fastmem_location] {
+        ctx.ebi.fastmem_patch_info.emplace_back(
+            fastmem_location - ctx.ebi.entry_point,
+            FastmemPatchInfo{
+                .marker = marker,
+                .fc = FakeCall{
+                    .call_pc = std::bit_cast<u64>(code.xptr<void*>()),
+                },
+                .recompile = ctx.conf.recompile_on_fastmem_failure,
+            });
+
+        code.l(*fallback);
+        EmitRelocation(code, ctx, ExclusiveWriteMemoryLinkTarget(bitsize));
+        if (ordered) {
+            code.DMB(oaknut::BarrierOp::ISH);
+        }
+        ctx.conf.emit_check_memory_abort(code, ctx, inst, *end);
+        code.B(*end);
+    });
+
+    code.l(*end);
+    ctx.reg_alloc.DefineAsRegister(inst, X0);
+}
+
 }  // namespace
 
 template<std::size_t bitsize>
@@ -673,6 +755,14 @@ void EmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* in
 
 template<std::size_t bitsize>
 void EmitExclusiveWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    if constexpr (bitsize <= 64) {
+        if (ctx.conf.global_monitor != nullptr && ctx.conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor)) {
+            if (const auto marker = ShouldFastmem(ctx, inst)) {
+                FastmemEmitExclusiveWriteMemory<bitsize>(code, ctx, inst, *marker);
+                return;
+            }
+        }
+    }
     CallbackOnlyEmitExclusiveWriteMemory<bitsize>(code, ctx, inst);
 }
 

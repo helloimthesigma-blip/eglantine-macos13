@@ -48,6 +48,7 @@ namespace Tegra {
 
 namespace {
 std::atomic<bool> g_nx2_skip_frame_work{};
+std::atomic<bool> g_nx2_skip_frame_compute{};
 std::atomic<bool> g_nx2_shown_frame_skipped{};
 std::atomic<int> g_nx2_frame_skip_override{-1};
 
@@ -77,13 +78,27 @@ bool Nx2EndFrame() {
     }
     const bool was_skipped = g_nx2_skip_frame_work.load(std::memory_order_relaxed);
     ++frames;
-    g_nx2_skip_frame_work.store(skip != 0 && (frames % (skip + 1)) != 0, std::memory_order_relaxed);
+    const auto drawn = [&](u64 frame) { return skip == 0 || (frame % (skip + 1)) == 0; };
+    g_nx2_skip_frame_work.store(!drawn(frames), std::memory_order_relaxed);
+    // EDEN_NX2_FRAME_SKIP_PREP=1: the frame before a drawn one runs its compute work too (the
+    // drawn frame reads what the previous one computed). Off: in OoT it cost ~30% of the game
+    // speed and didn't remove the occasional white or purple particles.
+    static const bool prep = [] {
+        const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_PREP");
+        return value != nullptr && value[0] == '1';
+    }();
+    g_nx2_skip_frame_compute.store(!drawn(frames) && !(prep && drawn(frames + 1)),
+                                   std::memory_order_relaxed);
     return was_skipped;
 }
 } // Anonymous namespace
 
 bool Nx2SkippingFrameWork() {
     return g_nx2_skip_frame_work.load(std::memory_order_relaxed);
+}
+
+bool Nx2SkippingFrameCompute() {
+    return g_nx2_skip_frame_compute.load(std::memory_order_relaxed);
 }
 
 void Nx2SetFrameSkip(int frames) {

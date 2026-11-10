@@ -121,6 +121,8 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 | The game's cores spent ~39% of their busy time spinning on dynarmic's global exclusive-monitor lock | The ARM64 backend now honours `Unsafe_IgnoreGlobalMonitor` (the Auto CPU accuracy sets it): exclusive stores compare and swap, as the x64 backend does |
 | A fault on a 128-bit ordered store in fastmem crashed ("Segfault wasn't at a fastmem patch location") | The patch location is the store, not the barrier before it |
 | Indirect branches always went through the dispatcher's hash lookup | Fast dispatch table for the ARM64 backend (the x64 backend had one) |
+| Every guest exclusive store was a call into the emulator | With fastmem, it's an inline compare-and-swap (`CASAL`) against the core's reservation |
+| JIT bookkeeping took ~5 GB (hash maps per translated block, six cores) | Compact per-block lists: the process went from ~20 GB to ~15 GB |
 | A slow GPU slows the whole game (its speed follows its frame rate) | Frame skip: skipped frames run the game's commands but drop draws, clears and large compute dispatches, and aren't shown |
 | `eden-cli` could not find MoltenVK | Look next to the executable and in a sibling `eglantine.app` |
 | AV1 movies black (title background, intro) | FFmpeg with dav1d (`tools/macos13/build-ffmpeg-av1.sh`) |
@@ -134,6 +136,10 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 | CPU and GPU never overlap (each present waits for its own frame) | Opt-in: Options → Run a Frame Ahead (`EDEN_NX2_FRAMES_AHEAD=1`), faster but OOT's fog flickers |
 
 ## Known issues
+
+- **Frame skip** makes the picture choppier; while the camera moves the game's temporal
+  anti-aliasing smears a little (its history is several game frames old), and now and then falling
+  leaves or a light shaft show white or purple for a frame.
 
 - **Mesh shaders** are emulated with compute shaders (see above). Indirect mesh draws are still
   skipped, and many OOT mesh draws arrive with a zero count (upstream reads a GPU-written count
@@ -163,7 +169,10 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 - `EDEN_NX2_FRAME_SKIP=<n>` draws one frame in n + 1 (a path instead of a number: the file holding
   n, re-read every 30 frames). `EDEN_NX2_FRAME_SKIP_WORK` (bits: 1 draws, 2 clears, 4 compute)
   chooses what skipped frames drop; compute dispatches of at most `EDEN_NX2_FRAME_SKIP_COMPUTE_MAX`
-  threads (4096) still run, as do programs listed in `EDEN_NX2_FRAME_SKIP_KEEP=<hash>,...`.
+  threads (4096) still run, as do programs listed in `EDEN_NX2_FRAME_SKIP_KEEP=<hash>,...`;
+  `EDEN_NX2_FRAME_SKIP_PREP=1` runs all compute on the frame before a drawn one.
+- `EDEN_FASTMEM_16K_STATS=1` logs how much guest memory fastmem maps directly with 16K pages.
+  `DYNARMIC_INLINE_EXCLUSIVES=0` sends exclusive stores through the callbacks again.
 - `EDEN_JIT_MAP=<dir>` writes each core's JIT block map (host address, guest PC) every 10 s and the
   guest code once, to attribute `sample` profiles of JIT code to the game's code.
   `EDEN_NX2_CNTPCT_STATS=1` counts the guest's counter reads (busy-wait loops).

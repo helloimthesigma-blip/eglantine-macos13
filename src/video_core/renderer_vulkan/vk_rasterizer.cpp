@@ -760,6 +760,10 @@ bool SkipFrameWork(u32 kind) {
     if (!Tegra::Nx2SkippingFrameWork()) {
         return false;
     }
+    // A diagnostics capture (draw list and screenshot) needs the frame drawn.
+    if (VideoCommon::Nx2Diag::Active() && VideoCommon::Nx2Diag::Diagnostics::Get().Capturing()) {
+        return false;
+    }
     static const u32 mask = [] {
         const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_WORK");
         return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 7U;
@@ -1373,7 +1377,7 @@ bool SyncFixEnabled() {
 
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
-    if (SkipFrameWork(4)) {
+    if (SkipFrameWork(4) && Tegra::Nx2SkippingFrameCompute()) {
         // A skipped frame drops the large dispatches (image processing over the screen, culling)
         // but runs the small ones: state carried between frames (exposure, particles) keeps
         // updating. EDEN_NX2_FRAME_SKIP_COMPUTE_MAX: the most threads a kept dispatch has.
