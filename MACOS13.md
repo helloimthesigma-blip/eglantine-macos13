@@ -118,8 +118,8 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 |---|---|
 | Upstream builds need macOS 15 and a newer libc++ | `tools/macos13/build.sh`: deployment target 13.0, Homebrew LLVM with static libc++ |
 | Heap corruption at startup (two libc++ copies) | Export only `main` from the executables |
-| `assert page size 0x4000 is incompatible with 4K paging` | Fastmem with 16K host pages: a host page is mapped while its four guest pages are consecutive backing on a 16K boundary; other accesses fall back to the page table (`EDEN_FASTMEM_16K=0` turns it off) |
-| The game's cores spent ~39% of their busy time spinning on dynarmic's global exclusive-monitor lock | The ARM64 backend now honours `Unsafe_IgnoreGlobalMonitor` (the Auto CPU accuracy sets it): exclusive stores compare and swap, as the x64 backend does |
+| `assert page size 0x4000 is incompatible with 4K paging` | 16K host pages skip fastmem. Fastmem with 16K host pages (a host page mapped while its four guest pages are consecutive backing on a 16K boundary, other accesses falling back to the page table) is opt-in, `EDEN_FASTMEM_16K=1`: it faults millions of times while a game loads, and OoT corrupted its memory around loads in about a quarter of boots with it (never without it; cause not found yet) |
+| The game's cores spent ~39% of their busy time spinning on dynarmic's global exclusive-monitor lock | The monitor locks per address (64 stripes), with the old semantics (`EDEN_NX2_SERIALIZE_ATOMICS=1` takes the global lock too). Compare-and-swap without a lock (`Unsafe_IgnoreGlobalMonitor`, `DYNARMIC_LOCAL_MONITOR=1`) misses ABA and is opt-in |
 | A fault on a 128-bit ordered store in fastmem crashed ("Segfault wasn't at a fastmem patch location") | The patch location is the store, not the barrier before it |
 | Indirect branches always went through the dispatcher's hash lookup | Fast dispatch table for the ARM64 backend (the x64 backend had one) |
 | Every guest exclusive store was a call into the emulator | Opt-in (`DYNARMIC_INLINE_EXCLUSIVES=1`): an inline compare-and-swap (`CASAL`) on the fastmem address. Off by default while memory corruption seen during loading is investigated |
@@ -172,6 +172,8 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
   chooses what skipped frames drop; compute dispatches of at most `EDEN_NX2_FRAME_SKIP_COMPUTE_MAX`
   threads (4096) still run, as do programs listed in `EDEN_NX2_FRAME_SKIP_KEEP=<hash>,...`;
   `EDEN_NX2_FRAME_SKIP_PREP=1` runs all compute on the frame before a drawn one.
+- `EDEN_NX2_SERIALIZE_ATOMICS=1` (always) or `=a` (outside busy 3D frames) makes the guest's atomics
+  also take one global lock.
 - `EDEN_NX2_PENDING_ACQUIRE=1` lets a semaphore acquire on the GPU thread pass on a release already
   queued to the host GPU instead of waiting for it. Experimental: in OoT the game corrupted its
   memory with it (as with GPU accuracy Low), so it is off.

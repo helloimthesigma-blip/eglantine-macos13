@@ -110,6 +110,18 @@ static void* EmitWrappedReadCallTrampoline(oaknut::CodeGenerator& code, T* this_
     return target;
 }
 
+// Exclusive accesses with only the processor's own reservation and a compare-and-swap
+// (Unsafe_IgnoreGlobalMonitor), opt-in with DYNARMIC_LOCAL_MONITOR=1: it misses ABA (another core
+// changing the value and changing it back), and OoT's lock-free structures corrupted while
+// loading. The monitor's per-address locks are fast enough.
+static bool LocalMonitor(const A64::UserConfig& conf) {
+    static const bool allowed = [] {
+        const char* value = std::getenv("DYNARMIC_LOCAL_MONITOR");
+        return value != nullptr && value[0] == '1';
+    }();
+    return allowed && conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor);
+}
+
 template<auto callback, typename T>
 static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig& conf) {
     using namespace oaknut::util;
@@ -121,7 +133,7 @@ static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const 
             return (conf.callbacks->*callback)(vaddr, sizeof(T));
         };
         // Without the global lock: the exclusive store compares and swaps (as the x64 backend).
-        if (conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor)) {
+        if (LocalMonitor(conf)) {
             return conf.global_monitor->ReadAndMarkLocal<T>(conf.processor_id, vaddr, read);
         }
         return conf.global_monitor->ReadAndMark<T>(conf.processor_id, vaddr, read);
@@ -180,7 +192,7 @@ static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const
         const auto write = [&](T expected) -> bool {
             return (conf.callbacks->*callback)(vaddr, value, expected);
         };
-        if (conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor)) {
+        if (LocalMonitor(conf)) {
             return conf.global_monitor->DoExclusiveOperationLocal<T>(conf.processor_id, vaddr, write) ? 0 : 1;
         }
         return conf.global_monitor->DoExclusiveOperation<T>(conf.processor_id, vaddr, write) ? 0 : 1;
@@ -264,7 +276,7 @@ static void* EmitExclusiveRead128CallTrampoline(oaknut::CodeGenerator& code, con
         const auto read = [&]() -> Vector {
             return conf.callbacks->MemoryRead128(vaddr);
         };
-        if (conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor)) {
+        if (LocalMonitor(conf)) {
             return conf.global_monitor->ReadAndMarkLocal<Vector>(conf.processor_id, vaddr, read);
         }
         return conf.global_monitor->ReadAndMark<Vector>(conf.processor_id, vaddr, read);
@@ -350,7 +362,7 @@ static void* EmitExclusiveWrite128CallTrampoline(oaknut::CodeGenerator& code, co
         const auto write = [&](Vector expected) -> bool {
             return conf.callbacks->MemoryWriteExclusive128(vaddr, value, expected);
         };
-        if (conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor)) {
+        if (LocalMonitor(conf)) {
             return conf.global_monitor->DoExclusiveOperationLocal<Vector>(conf.processor_id, vaddr, write) ? 0 : 1;
         }
         return conf.global_monitor->DoExclusiveOperation<Vector>(conf.processor_id, vaddr, write) ? 0 : 1;
@@ -375,7 +387,11 @@ static void* EmitExclusiveWrite128CallTrampoline(oaknut::CodeGenerator& code, co
 A64AddressSpace::A64AddressSpace(const A64::UserConfig& conf)
         : AddressSpace(conf.code_cache_size)
         , conf(conf) {
-    if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
+    static const bool fast_dispatch_allowed = [] {
+        const char* value = std::getenv("DYNARMIC_FAST_DISPATCH");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (fast_dispatch_allowed && conf.HasOptimization(OptimizationFlag::FastDispatch)) {
         fast_dispatch_table = std::make_unique<FastDispatchEntry[]>(FastDispatchCount);
         ClearFastDispatchTable();
     }

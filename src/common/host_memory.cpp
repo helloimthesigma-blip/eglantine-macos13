@@ -542,10 +542,12 @@ public:
             // Apple Silicon (16K pages): a host page holds four guest pages. A host page is
             // mapped only while its four guest pages map four consecutive 4K of backing that
             // start on a 16K boundary; the rest stay inaccessible and the JIT's fastmem accesses
-            // there fault and fall back to the page table (EDEN_FASTMEM_16K=0 disables fastmem).
+            // there fault and fall back to the page table. Opt-in (EDEN_FASTMEM_16K=1): the faults
+            // are frequent (millions while a game loads), and OoT corrupted its memory around loads
+            // in about a quarter of boots with it, never without it (cause not found).
             const char* value = std::getenv("EDEN_FASTMEM_16K");
-            if (value != nullptr && value[0] == '0') {
-                LOG_INFO(HW_Memory, "Host page size {:#x}: fastmem disabled (EDEN_FASTMEM_16K=0)", page_size);
+            if (value == nullptr || value[0] != '1') {
+                LOG_INFO(HW_Memory, "Host page size {:#x}: fastmem off (EDEN_FASTMEM_16K=1 enables it)", page_size);
                 return false;
             }
             split_pages = true;

@@ -841,9 +841,20 @@ bool RasterizerVulkan::SkipFrameDraw(u32 kind) {
     // running those every time was ~40% slower.
     static const char new_targets = [] {
         const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_TARGETS");
-        return value != nullptr ? value[0] : '1';
+        return value != nullptr ? value[0] : '0';
     }();
     const auto& rt0 = maxwell3d->regs.rt[0];
+    // Depth-only passes (no colour format) are never one-time UI work: OoT updates its shadow
+    // cascades one per frame, which lined up with the skipped frames.
+    if (static_cast<u32>(rt0.format) == 0) {
+        return true;
+    }
+    // Display-size targets (1920x1080 and up) always draw: OoT's HUD, minimap and dialog layers
+    // are drawn there (the 3D scene renders smaller and is scaled up), only partly redrawn each
+    // frame, and were garbled when skipped frames dropped their draws. 2D quads, cheap.
+    if (rt0.width >= 1920 && rt0.height >= 1080) {
+        return false;
+    }
     const bool large = u64{rt0.width} * rt0.height >= 256 * 256;
     if (new_targets == '0' || (new_targets == '1' && !large) ||
         g_frame_skip_targets.SeenLastDrawn(key)) {
@@ -1475,9 +1486,7 @@ void RasterizerVulkan::DispatchCompute() {
         // updating. EDEN_NX2_FRAME_SKIP_COMPUTE_MAX: the most threads a kept dispatch has.
         static const u64 max_threads = [] {
             const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_COMPUTE_MAX");
-            // 32768: OoT's text glyph cache fills (3x2x64 groups of 8x8) run; its fog and image
-            // passes (65k-300k threads) are dropped.
-            return value != nullptr ? std::strtoull(value, nullptr, 0) : u64{32768};
+            return value != nullptr ? std::strtoull(value, nullptr, 0) : u64{4096};
         }();
         const auto& launch = kepler_compute->launch_description;
         const u64 threads = u64{launch.grid_dim_x} * launch.grid_dim_y * launch.grid_dim_z *
@@ -1486,7 +1495,10 @@ void RasterizerVulkan::DispatchCompute() {
         if (indirect || threads > max_threads) {
             // EDEN_NX2_FRAME_SKIP_KEEP=<hash>,...: compute programs that always run.
             static const std::vector<u64> keep = [] {
-                std::vector<u64> hashes;
+                // Built in: Ocarina of Time's text glyph cache fills (3x2x64 groups of 8x8),
+                // which run only when new text shows; dropped, dialog text was garbled.
+                std::vector<u64> hashes{0x8a1e2b71010424f0ULL, 0xa213bd43102b2e81ULL,
+                                        0xf099711cc289fe72ULL};
                 if (const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_KEEP")) {
                     for (const char* p = value; *p != '\0';) {
                         char* end{};
@@ -1529,12 +1541,11 @@ void RasterizerVulkan::DispatchCompute() {
             }
             // Programs the last drawn frame didn't run are one-time work: they run.
             g_frame_skip_targets.Sync();
-            // On by default for compute (EDEN_NX2_FRAME_SKIP_NEW_PROGRAMS=0 turns it off): OoT
-            // fills its text glyph cache with compute only when new text shows, and with those
-            // dispatches dropped the dialog text was garbled.
+            // Opt-in (EDEN_NX2_FRAME_SKIP_NEW_PROGRAMS=1): run compute programs the last drawn frames
+            // didn't run. In OoT it cost ~30%; its glyph cache programs are kept by hash instead.
             static const bool new_programs = [] {
                 const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_PROGRAMS");
-                return value == nullptr || value[0] != '0';
+                return value != nullptr && value[0] == '1';
             }();
             const bool every_frame = !new_programs || g_frame_skip_targets.SeenLastDrawn(hash ^ 0xC0C0C0C0ULL);
             if (!writes_buffers && every_frame && std::find(keep.begin(), keep.end(), hash) == keep.end()) {

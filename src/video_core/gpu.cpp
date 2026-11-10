@@ -38,6 +38,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
+#include <dynarmic/interface/exclusive_monitor.h>
 #include "video_core/gpu_thread.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
@@ -98,8 +99,40 @@ bool Nx2EndFrame() {
     static u32 busy_history = 0;
     busy_history = (busy_history << 1) | (frame_draws >= min_draws ? 1U : 0U);
     const bool busy = std::popcount(busy_history) >= 20;
+    // EDEN_NX2_SERIALIZE_ATOMICS=1 makes the CPU's atomics also take one global lock (as before
+    // the monitor's per-address locks), =a only outside busy 3D frames. Off by default: the memory
+    // corruption it was tried against came with 16K fastmem, which is now opt-in.
+    static const char serialize_mode = [] {
+        const char* value = std::getenv("EDEN_NX2_SERIALIZE_ATOMICS");
+        return value != nullptr ? value[0] : '0';
+    }();
+    Dynarmic::ExclusiveMonitor::SetSerialized(serialize_mode == '1' || (serialize_mode == 'a' && !busy));
+    // The drawn frames: one in skip + 1. With an even period the gap alternates between
+    // period - 1 and period + 1 (same average), so drawn frames alternate between odd and even
+    // frames: games swap pairs of targets every frame (history buffers), and drawing only every
+    // 4th frame always saw the same one of each pair.
+    static u64 next_drawn = 0;
+    static bool long_gap = false;
+    const u64 period = skip + 1;
+    const auto drawn_now = [&] {
+        if (skip == 0 || !busy || frames >= next_drawn + 4 * period) {
+            next_drawn = frames + period;
+            return true;
+        }
+        if (frames < next_drawn) {
+            return false;
+        }
+        u64 gap = period;
+        if (period % 2 == 0) {
+            gap = long_gap ? period + 1 : period - 1;
+            long_gap = !long_gap;
+        }
+        next_drawn = frames + gap;
+        return true;
+    };
+    const bool this_drawn = drawn_now();
     const auto drawn = [&](u64 frame) {
-        return skip == 0 || !busy || (frame % (skip + 1)) == 0;
+        return frame == frames ? this_drawn : (skip == 0 || !busy || frame >= next_drawn);
     };
     g_nx2_skip_frame_work.store(!drawn(frames), std::memory_order_relaxed);
     // EDEN_NX2_FRAME_SKIP_PREP=1: the frame before a drawn one runs its compute work too (the

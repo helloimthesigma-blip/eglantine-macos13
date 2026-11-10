@@ -32,30 +32,31 @@ void ExclusiveMonitor::Unlock() {
 bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
     const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
-    Lock();
-    if (exclusive_addresses[processor_id] != masked_address) {
-        Unlock();
+    SpinLock& stripe = StripeLock(masked_address);
+    stripe.Lock();
+    if (std::atomic_ref<VAddr>{exclusive_addresses[processor_id]}.load(std::memory_order_relaxed) != masked_address) {
+        stripe.Unlock();
         return false;
     }
 
+    // Other processors' reservations of this address are only set under this stripe's lock, so
+    // clearing them here can't lose a newer one; a processor that moved on to another address
+    // meanwhile keeps it (compare and swap).
     for (VAddr& other_address : exclusive_addresses) {
-        if (other_address == masked_address) {
-            other_address = INVALID_EXCLUSIVE_ADDRESS;
-        }
+        VAddr expected = masked_address;
+        std::atomic_ref<VAddr>{other_address}.compare_exchange_strong(expected, INVALID_EXCLUSIVE_ADDRESS, std::memory_order_relaxed);
     }
     return true;
 }
 
 void ExclusiveMonitor::Clear() {
-    Lock();
-    std::fill(exclusive_addresses.begin(), exclusive_addresses.end(), INVALID_EXCLUSIVE_ADDRESS);
-    Unlock();
+    for (VAddr& address : exclusive_addresses) {
+        std::atomic_ref<VAddr>{address}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_relaxed);
+    }
 }
 
-void ExclusiveMonitor::ClearProcessor(std::size_t processor_id) {
-    Lock();
-    exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
-    Unlock();
+void ExclusiveMonitor::ClearProcessor(size_t processor_id) {
+    std::atomic_ref<VAddr>{exclusive_addresses[processor_id]}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_relaxed);
 }
 
 }  // namespace Dynarmic
