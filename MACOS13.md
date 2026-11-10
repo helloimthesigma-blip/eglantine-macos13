@@ -122,7 +122,7 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 | The game's cores spent ~39% of their busy time spinning on dynarmic's global exclusive-monitor lock | The ARM64 backend now honours `Unsafe_IgnoreGlobalMonitor` (the Auto CPU accuracy sets it): exclusive stores compare and swap, as the x64 backend does |
 | A fault on a 128-bit ordered store in fastmem crashed ("Segfault wasn't at a fastmem patch location") | The patch location is the store, not the barrier before it |
 | Indirect branches always went through the dispatcher's hash lookup | Fast dispatch table for the ARM64 backend (the x64 backend had one) |
-| Every guest exclusive store was a call into the emulator | With fastmem, it's an inline compare-and-swap (`CASAL`) against the core's reservation |
+| Every guest exclusive store was a call into the emulator | Opt-in (`DYNARMIC_INLINE_EXCLUSIVES=1`): an inline compare-and-swap (`CASAL`) on the fastmem address. Off by default while memory corruption seen during loading is investigated |
 | JIT bookkeeping took ~5 GB (hash maps per translated block, six cores) | Compact per-block lists: the process went from ~20 GB to ~15 GB |
 | A slow GPU slows the whole game (its speed follows its frame rate) | Frame skip: skipped frames run the game's commands but drop draws, clears and large compute dispatches, and aren't shown. Only busy 3D frames are skipped (most of the last 32 with 300+ draws), so loading screens and menus run in full |
 | `eden-cli` could not find MoltenVK | Look next to the executable and in a sibling `eglantine.app` |
@@ -175,12 +175,14 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 - `EDEN_NX2_PENDING_ACQUIRE=1` lets a semaphore acquire on the GPU thread pass on a release already
   queued to the host GPU instead of waiting for it. Experimental: in OoT the game corrupted its
   memory with it (as with GPU accuracy Low), so it is off.
-- `EDEN_NX2_FRAME_SKIP_MIN_DRAWS=<n>` (300) is the draws a frame needs to count as busy;
-  `EDEN_NX2_FRAME_SKIP_NEW_TARGETS=1` also runs work on targets and programs the last drawn frames
-  didn't use (Voland's rule; in OoT round-robin targets made it ~40% slower);
-  `EDEN_NX2_FRAME_SKIP_KEEP_BUFFERS=1` keeps compute that writes buffers (purple lighting in OoT).
+- `EDEN_NX2_FRAME_SKIP_MIN_DRAWS=<n>` (300) is the draws a frame needs to count as busy.
+  Skipped frames still run draws into colour targets of at least 256x256 that none of the last
+  four drawn frames used (HUD, minimap and dialog layers redrawn only when they change;
+  `EDEN_NX2_FRAME_SKIP_NEW_TARGETS=0` none, `=2` any size), and compute programs those frames
+  didn't run (`EDEN_NX2_FRAME_SKIP_NEW_PROGRAMS=0` off). `EDEN_NX2_FRAME_SKIP_KEEP_BUFFERS=1`
+  keeps compute that writes buffers (it turned OoT's lighting purple).
 - `EDEN_FASTMEM_16K_STATS=1` logs how much guest memory fastmem maps directly with 16K pages.
-  `DYNARMIC_INLINE_EXCLUSIVES=0` sends exclusive stores through the callbacks again.
+  `DYNARMIC_INLINE_EXCLUSIVES=1` makes exclusive stores inline compare-and-swaps.
 - `EDEN_JIT_MAP=<dir>` writes each core's JIT block map (host address, guest PC) every 10 s and the
   guest code once, to attribute `sample` profiles of JIT code to the game's code.
   `EDEN_NX2_CNTPCT_STATS=1` counts the guest's counter reads (busy-wait loops).

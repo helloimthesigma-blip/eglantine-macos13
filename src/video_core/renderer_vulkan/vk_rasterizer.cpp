@@ -797,10 +797,14 @@ struct FrameSkipTargets {
 };
 FrameSkipTargets g_frame_skip_targets;
 
+// The colour target alone (OoT alternates two depth buffers between frames, so with an even skip
+// period the drawn frames never saw the other one); the depth target for depth-only passes.
 u64 DrawTargetKey(const Tegra::Engines::Maxwell3D::Regs& regs) {
     const u64 color = regs.rt[0].Address();
-    const u64 depth = regs.zeta_enable != 0 ? regs.zeta.Address() : 0;
-    return color * 0x9E3779B97F4A7C15ULL ^ depth;
+    if (color != 0) {
+        return color;
+    }
+    return regs.zeta_enable != 0 ? regs.zeta.Address() ^ 0xD0D0D0D0ULL : 0;
 }
 
 /// Frame skip: which work a skipped frame drops (EDEN_NX2_FRAME_SKIP_WORK, bits: 1 draws, 2 clears,
@@ -831,13 +835,18 @@ bool RasterizerVulkan::SkipFrameDraw(u32 kind) {
     if (!SkipFrameWork(kind)) {
         return false;
     }
-    // Opt-in (EDEN_NX2_FRAME_SKIP_NEW_TARGETS=1): OoT updates some targets round-robin, one every
-    // few frames, which lines up with the skipped frames and ran them every time (~40% slower).
-    static const bool new_targets = [] {
+    // Targets of at least 256x256 only (EDEN_NX2_FRAME_SKIP_NEW_TARGETS=0: none, =2: all): OoT's
+    // HUD, minimap and dialog layers are redrawn only when they change and were left garbled;
+    // small targets it updates round-robin (128x128 and less) line up with the skipped frames, and
+    // running those every time was ~40% slower.
+    static const char new_targets = [] {
         const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_TARGETS");
-        return value != nullptr && value[0] == '1';
+        return value != nullptr ? value[0] : '1';
     }();
-    if (!new_targets || g_frame_skip_targets.SeenLastDrawn(key)) {
+    const auto& rt0 = maxwell3d->regs.rt[0];
+    const bool large = u64{rt0.width} * rt0.height >= 256 * 256;
+    if (new_targets == '0' || (new_targets == '1' && !large) ||
+        g_frame_skip_targets.SeenLastDrawn(key)) {
         return true;
     }
     // EDEN_NX2_FRAME_SKIP_LOG_NEW=1: log targets a skipped frame draws because they are new.
@@ -1466,7 +1475,9 @@ void RasterizerVulkan::DispatchCompute() {
         // updating. EDEN_NX2_FRAME_SKIP_COMPUTE_MAX: the most threads a kept dispatch has.
         static const u64 max_threads = [] {
             const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_COMPUTE_MAX");
-            return value != nullptr ? std::strtoull(value, nullptr, 0) : u64{4096};
+            // 32768: OoT's text glyph cache fills (3x2x64 groups of 8x8) run; its fog and image
+            // passes (65k-300k threads) are dropped.
+            return value != nullptr ? std::strtoull(value, nullptr, 0) : u64{32768};
         }();
         const auto& launch = kepler_compute->launch_description;
         const u64 threads = u64{launch.grid_dim_x} * launch.grid_dim_y * launch.grid_dim_z *
@@ -1518,9 +1529,12 @@ void RasterizerVulkan::DispatchCompute() {
             }
             // Programs the last drawn frame didn't run are one-time work: they run.
             g_frame_skip_targets.Sync();
+            // On by default for compute (EDEN_NX2_FRAME_SKIP_NEW_PROGRAMS=0 turns it off): OoT
+            // fills its text glyph cache with compute only when new text shows, and with those
+            // dispatches dropped the dialog text was garbled.
             static const bool new_programs = [] {
-                const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_TARGETS");
-                return value != nullptr && value[0] == '1';
+                const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_PROGRAMS");
+                return value == nullptr || value[0] != '0';
             }();
             const bool every_frame = !new_programs || g_frame_skip_targets.SeenLastDrawn(hash ^ 0xC0C0C0C0ULL);
             if (!writes_buffers && every_frame && std::find(keep.begin(), keep.end(), hash) == keep.end()) {

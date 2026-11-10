@@ -632,10 +632,11 @@ EmitConfig A64AddressSpace::GetEmitConfig() {
 
         .very_verbose_debugging_output = conf.very_verbose_debugging_output,
     };
-    // DYNARMIC_INLINE_EXCLUSIVES=0: exclusive stores always go through the callbacks.
+    // DYNARMIC_INLINE_EXCLUSIVES=1: exclusive stores compare and swap inline. Off: OoT corrupted
+    // its memory while loading in several runs with it on (cause not found yet).
     static const bool inline_exclusives = [] {
         const char* value = std::getenv("DYNARMIC_INLINE_EXCLUSIVES");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] == '1';
     }();
     if (inline_exclusives) {
         emit_config.global_monitor = conf.global_monitor;
