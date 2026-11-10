@@ -83,18 +83,14 @@ ahead. **Run a Frame Ahead** on its own overlaps the game's CPU work with the GP
 
 ## Performance on an M1 (8-core GPU, 16 GB)
 
-Game speed in Kokiri Forest at 0.5x (frames the game runs per second, of 60), with frame skip
-(running a frame ahead):
+Game speed in Kokiri Forest at 0.5x (frames the game runs per second, of 60; running a frame
+ahead):
 
 | Frame skip | Game speed |
 |---|---|
-| Off | ~8 fps |
-| Draw every 2nd frame | ~20-25 fps |
-| Draw every 3rd frame | ~28 fps |
-| Draw every 4th frame | ~38 fps |
-| Nothing drawn (the CPU limit) | ~43 fps |
-
-Before the CPU work below, the CPU limit was ~21 fps.
+| Off | ~12 fps (8 before this work) |
+| Draw every 3rd frame | ~30 fps |
+| Draw every 4th frame | ~28 fps |
 
 - Title screen: 60 fps.
 - Gameplay at 0.5x: about 8-9 fps indoors (~115 ms per frame), ~7 fps outdoors. 0.5x still looks
