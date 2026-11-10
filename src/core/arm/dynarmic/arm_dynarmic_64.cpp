@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <atomic>
 #include <cstdlib>
 #if defined(_M_X64) || defined(__x86_64__)
@@ -180,6 +181,23 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
         const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE");
         return value == nullptr || value[0] != '0';
     }();
+    // EDEN_NX2_CNTPCT_STATS=1: log the counter reads per second (all cores), and how many were
+    // within the spin window of the previous one.
+    static const bool stats = std::getenv("EDEN_NX2_CNTPCT_STATS") != nullptr;
+    if (stats) {
+        static std::atomic<u64> reads{}, spins{};
+        static std::atomic<s64> last_log{};
+        reads.fetch_add(1, std::memory_order_relaxed);
+        if (ticks - m_last_cntpct < m_spin_ticks) {
+            spins.fetch_add(1, std::memory_order_relaxed);
+        }
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        s64 last = last_log.load(std::memory_order_relaxed);
+        if (now - last > 5'000'000'000LL && last_log.compare_exchange_strong(last, now)) {
+            LOG_INFO(Core_ARM, "CNTPCT reads in 5 s: {} ({} within the spin window)",
+                     reads.exchange(0), spins.exchange(0));
+        }
+    }
     if (pause_spins && ticks - m_last_cntpct < m_spin_ticks) {
 #if defined(_M_X64) || defined(__x86_64__)
         _mm_pause();
@@ -386,6 +404,40 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 }
 
 HaltReason ArmDynarmic64::RunThread(Kernel::KThread* thread) {
+    // EDEN_JIT_MAP=<dir>: every 10 s, each core writes its translated blocks (host address, guest
+    // PC) to <dir>/jitmap-<core>.txt, to attribute host profiler samples in JIT code to guest code.
+    static const char* const jit_map_dir = std::getenv("EDEN_JIT_MAP");
+    if (jit_map_dir != nullptr) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - m_last_jit_map > std::chrono::seconds{10}) {
+            m_last_jit_map = now;
+            const std::string path = fmt::format("{}/jitmap-{}.txt", jit_map_dir, m_core_index);
+            if (std::FILE* file = std::fopen(path.c_str(), "w")) {
+                m_jit->DumpBlockMap(file);
+                std::fclose(file);
+            }
+            // Once, from core 0 after a minute: the guest code from 0x80000000 to 0x88000000
+            // (the modules), to disassemble hot blocks. Unmapped pages are zeros.
+            static std::atomic<bool> code_dumped{};
+            static const auto started = now;
+            if (m_core_index == 0 && now - started > std::chrono::seconds{60} &&
+                !code_dumped.exchange(true)) {
+                const std::string code_path = fmt::format("{}/guest-80000000.bin", jit_map_dir);
+                if (std::FILE* file = std::fopen(code_path.c_str(), "wb")) {
+                    std::vector<u8> page(0x1000);
+                    for (u64 address = 0x80000000; address < 0x88000000; address += 0x1000) {
+                        if (m_cb->m_memory.IsValidVirtualAddress(address)) {
+                            m_cb->m_memory.ReadBlock(address, page.data(), page.size());
+                        } else {
+                            std::fill(page.begin(), page.end(), u8{0});
+                        }
+                        std::fwrite(page.data(), 1, page.size(), file);
+                    }
+                    std::fclose(file);
+                }
+            }
+        }
+    }
     m_jit->ClearExclusiveState();
     return TranslateHaltReason(m_jit->Run());
 }

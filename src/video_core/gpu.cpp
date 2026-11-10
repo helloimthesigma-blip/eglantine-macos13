@@ -9,6 +9,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -43,6 +45,46 @@
 #include "video_core/shader_notify.h"
 
 namespace Tegra {
+
+namespace {
+std::atomic<bool> g_nx2_skip_frame_work{};
+std::atomic<bool> g_nx2_shown_frame_skipped{};
+
+/// Called on the GPU thread at each composite. Returns whether the frame that just ended was
+/// skipped (so it isn't shown), and decides whether the next one is.
+bool Nx2EndFrame() {
+    static u64 frames{};
+    static u64 skip{};
+    // A value starting with '/' names a file holding the number, read every 30 frames (lets test
+    // runs change it while the game runs).
+    if (const char* value = std::getenv("EDEN_NX2_FRAME_SKIP"); value == nullptr) {
+        skip = 0;
+    } else if (value[0] != '/') {
+        skip = std::strtoull(value, nullptr, 10);
+    } else if (frames % 30 == 0) {
+        skip = 0;
+        if (std::FILE* file = std::fopen(value, "r")) {
+            unsigned long long number{};
+            if (std::fscanf(file, "%llu", &number) == 1) {
+                skip = number;
+            }
+            std::fclose(file);
+        }
+    }
+    const bool was_skipped = g_nx2_skip_frame_work.load(std::memory_order_relaxed);
+    ++frames;
+    g_nx2_skip_frame_work.store(skip != 0 && (frames % (skip + 1)) != 0, std::memory_order_relaxed);
+    return was_skipped;
+}
+} // Anonymous namespace
+
+bool Nx2SkippingFrameWork() {
+    return g_nx2_skip_frame_work.load(std::memory_order_relaxed);
+}
+
+bool Nx2ComposingSkippedFrame() {
+    return g_nx2_shown_frame_skipped.load(std::memory_order_relaxed);
+}
 
 namespace {
 constexpr u64 GpuClockMultiplier(Settings::GpuClock clock) {
@@ -322,6 +364,7 @@ struct GPU::Impl {
         pending_composite_fence = RequestSyncOperation(
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
              composite_fences = std::move(fences)] {
+                g_nx2_shown_frame_skipped.store(Nx2EndFrame(), std::memory_order_relaxed);
                 if (num_fences == 0) {
                     renderer->Composite(composite_layers);
                     return;

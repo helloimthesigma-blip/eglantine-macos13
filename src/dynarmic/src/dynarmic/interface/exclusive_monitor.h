@@ -64,6 +64,31 @@ public:
         return result;
     }
 
+    /// ReadAndMark without the lock or the other processors: with
+    /// OptimizationFlag::Unsafe_IgnoreGlobalMonitor, a processor's reservation is only its own
+    /// address and value, and the exclusive store is a compare-and-swap against that value.
+    template<typename T, typename Function>
+    T ReadAndMarkLocal(size_t processor_id, VAddr address, Function op) {
+        static_assert(std::is_trivially_copyable_v<T>);
+        const T value = op();
+        std::memcpy(exclusive_values[processor_id].data(), &value, sizeof(T));
+        exclusive_addresses[processor_id] = address & RESERVATION_GRANULE_MASK;
+        return value;
+    }
+
+    /// DoExclusiveOperation's counterpart of ReadAndMarkLocal.
+    template<typename T, typename Function>
+        requires std::is_trivially_copyable_v<T>
+    bool DoExclusiveOperationLocal(size_t processor_id, VAddr address, Function op) {
+        if (exclusive_addresses[processor_id] != (address & RESERVATION_GRANULE_MASK)) {
+            return false;
+        }
+        exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
+        T saved_value;
+        std::memcpy(&saved_value, exclusive_values[processor_id].data(), sizeof(T));
+        return op(saved_value);
+    }
+
     /// Unmark everything.
     void Clear();
     /// Unmark processor id

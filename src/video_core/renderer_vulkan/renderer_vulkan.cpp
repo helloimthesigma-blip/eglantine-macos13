@@ -212,6 +212,15 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         render_window.OnFrameDisplayed();
     };
 
+    if (Tegra::Nx2ComposingSkippedFrame()) {
+        // Frame skip: this frame drew nothing. Submit its work and age the caches as a shown
+        // frame would, but keep the last drawn frame on screen.
+        scheduler.Flush();
+        gpu.RendererFrameEndNotify();
+        rasterizer.TickFrame();
+        return;
+    }
+
     RenderAppletCaptureLayer(framebuffers);
 
     if (!render_window.IsShown()) {

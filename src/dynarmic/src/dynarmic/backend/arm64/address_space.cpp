@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <cstring>
 #include <cstdio>
 
 #include <bit>
@@ -352,6 +353,28 @@ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
 fail:
     fmt::print("dynarmic: Segfault happened within JITted code at host_pc = {:016x}\n"
         "Segfault wasn't at a fastmem patch location!\n", host_pc);
+    {
+        const auto host_ptr = std::bit_cast<CodePtr>(host_pc);
+        u32 words[8]{};
+        std::memcpy(words, reinterpret_cast<const u8*>(host_pc) - 16, sizeof(words));
+        fmt::print("dynarmic: code around host_pc (from -16): {:08x} {:08x} {:08x} {:08x} [{:08x}] {:08x} {:08x} {:08x}\n",
+                   words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+        if (const auto entry = ReverseGetEntryPoint(host_ptr)) {
+            const auto info = block_infos.find(entry);
+            fmt::print("dynarmic: block entry {} (+{:#x}), {} patch locations:", fmt::ptr(entry),
+                       host_ptr - entry, info != block_infos.end() ? info->second.fastmem_patch_info.size() : 0);
+            if (info != block_infos.end()) {
+                for (const auto& [offset, patch] : info->second.fastmem_patch_info) {
+                    fmt::print(" {:#x}", offset);
+                }
+            }
+            fmt::print("\n");
+        }
+        if (const auto location = ReverseGetLocation(host_ptr)) {
+            fmt::print("dynarmic: location {:#x}\n", location->Value());
+        }
+        std::fflush(stdout);
+    }
     UNREACHABLE();
 }
 

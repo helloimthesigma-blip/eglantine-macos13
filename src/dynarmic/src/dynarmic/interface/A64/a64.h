@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -115,6 +116,9 @@ public:
 
     /// Clears exclusive state for this core.
     void ClearExclusiveState();
+
+    /// Profiling aid: writes "host_address guest_pc" (hex) for each translated block to file.
+    void DumpBlockMap(std::FILE* file) const;
 
     /**
      * Returns true if Jit::Run was called but hasn't returned yet.

@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include <atomic>
 #include <memory>
 #include "common/container/unordered_map.h"
@@ -117,6 +119,7 @@ private:
 
     // SVC callback
     u32 m_svc{};
+    std::chrono::steady_clock::time_point m_last_jit_map{};
 
     // Watchpoint info
     const Kernel::DebugWatchpoint* m_halted_watchpoint{};

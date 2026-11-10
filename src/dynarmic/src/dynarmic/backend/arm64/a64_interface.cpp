@@ -142,6 +142,13 @@ struct Jit::Impl final {
         return {};
     }
 
+    void DumpBlockMap(std::FILE* file) const {
+        current_address_space.ForEachBlock([file](const auto host, const IR::LocationDescriptor location) {
+            std::fprintf(file, "%llx %llx\n", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(host)),
+                         static_cast<unsigned long long>(A64::LocationDescriptor{location}.PC()));
+        });
+    }
+
 private:
     void PerformRequestedCacheInvalidation(HaltReason hr) {
         if (Has(hr, HaltReason::CacheInvalidation)) {
@@ -292,6 +299,10 @@ void Jit::SetPstate(std::uint32_t value) {
 
 void Jit::ClearExclusiveState() {
     impl->ClearExclusiveState();
+}
+
+void Jit::DumpBlockMap(std::FILE* file) const {
+    impl->DumpBlockMap(file);
 }
 
 bool Jit::IsExecuting() const {

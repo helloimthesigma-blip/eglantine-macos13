@@ -384,6 +384,8 @@ CodePtr EmitMemoryStr(oaknut::CodeGenerator& code, int value_idx, oaknut::XReg X
             break;
         case 128:
             code.DMB(oaknut::BarrierOp::ISH);
+            // The store is what faults: the patch location must be it, not the barrier.
+            fastmem_location = code.xptr<CodePtr>();
             code.STR(oaknut::QReg{value_idx}, Xscratch0);
             code.DMB(oaknut::BarrierOp::ISH);
             break;

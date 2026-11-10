@@ -45,6 +45,14 @@ public:
     void InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& descriptors);
 
     void ClearCache();
+
+    /// Profiling aid: calls f(host entry point, location) for every emitted block.
+    template<typename F>
+    void ForEachBlock(F&& f) const {
+        for (const auto& [host, location] : reverse_block_entries) {
+            f(host, location);
+        }
+    }
 protected:
     virtual EmitConfig GetEmitConfig() = 0;
     virtual void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) = 0;

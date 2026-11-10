@@ -11,6 +11,7 @@
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
+#include <unordered_set>
 #include <cstring>
 #include <filesystem>
 #include <tuple>
@@ -33,6 +34,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/gpu.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
@@ -751,8 +753,26 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 }
 } // Anonymous namespace
 
+namespace {
+/// Frame skip: which work a skipped frame drops (EDEN_NX2_FRAME_SKIP_WORK, bits: 1 draws, 2 clears,
+/// 4 compute; default all).
+bool SkipFrameWork(u32 kind) {
+    if (!Tegra::Nx2SkippingFrameWork()) {
+        return false;
+    }
+    static const u32 mask = [] {
+        const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_WORK");
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 7U;
+    }();
+    return (mask & kind) != 0;
+}
+} // Anonymous namespace
+
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    if (SkipFrameWork(1)) {
+        return;
+    }
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
         // should have written. Past 16M vertices they are garbage: building the quad index
@@ -1003,6 +1023,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 
 void RasterizerVulkan::DrawIndirect() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    if (SkipFrameWork(1)) {
+        return;
+    }
     const auto& params = maxwell3d->draw_manager.indirect_state;
     if (VideoCommon::Nx2Diag::Active()) {
         g_diag_draw = {"indirect", static_cast<u32>(params.max_draw_counts), 0};
@@ -1136,6 +1159,9 @@ void RasterizerVulkan::DrawTexture() {
 
 void RasterizerVulkan::Clear(u32 layer_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
+    if (SkipFrameWork(2)) {
+        return;
+    }
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
         const auto& regs = maxwell3d->regs;
         LOG_INFO(HW_GPU, "after upscale: clear rt0 {:#x} {}x{} fmt {:#x} surface {:#x} colour {} {} {} {}",
@@ -1347,6 +1373,52 @@ bool SyncFixEnabled() {
 
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
+    if (SkipFrameWork(4)) {
+        // A skipped frame drops the large dispatches (image processing over the screen, culling)
+        // but runs the small ones: state carried between frames (exposure, particles) keeps
+        // updating. EDEN_NX2_FRAME_SKIP_COMPUTE_MAX: the most threads a kept dispatch has.
+        static const u64 max_threads = [] {
+            const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_COMPUTE_MAX");
+            return value != nullptr ? std::strtoull(value, nullptr, 0) : u64{4096};
+        }();
+        const auto& launch = kepler_compute->launch_description;
+        const u64 threads = u64{launch.grid_dim_x} * launch.grid_dim_y * launch.grid_dim_z *
+                            launch.block_dim_x * launch.block_dim_y * launch.block_dim_z;
+        const bool indirect = kepler_compute->GetIndirectComputeAddress().has_value();
+        if (indirect || threads > max_threads) {
+            // EDEN_NX2_FRAME_SKIP_KEEP=<hash>,...: compute programs that always run.
+            static const std::vector<u64> keep = [] {
+                std::vector<u64> hashes;
+                if (const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_KEEP")) {
+                    for (const char* p = value; *p != '\0';) {
+                        char* end{};
+                        hashes.push_back(std::strtoull(p, &end, 16));
+                        p = *end == ',' ? end + 1 : end;
+                        if (end == p && *p != '\0') {
+                            ++p;
+                        }
+                    }
+                }
+                return hashes;
+            }();
+            u64 skip_native_key{};
+            const ComputePipeline* const skip_pipeline =
+                pipeline_cache.CurrentComputePipeline(skip_native_key);
+            const u64 hash = skip_pipeline != nullptr ? skip_pipeline->ShaderHash() : 0;
+            if (std::find(keep.begin(), keep.end(), hash) == keep.end()) {
+                static std::mutex seen_mutex;
+                static std::unordered_set<u64> seen;
+                std::scoped_lock seen_lock{seen_mutex};
+                if (seen.insert(hash).second) {
+                    LOG_INFO(Render_Vulkan, "Frame skip drops compute {:016x}: {}x{}x{} groups of {}x{}x{}{}",
+                             hash, launch.grid_dim_x, launch.grid_dim_y, launch.grid_dim_z,
+                             launch.block_dim_x, launch.block_dim_y, launch.block_dim_z,
+                             indirect ? " (indirect)" : "");
+                }
+                return;
+            }
+        }
+    }
     FlushWork();
     gpu_memory->FlushCaching();
     if (frame_dump.Capturing()) {

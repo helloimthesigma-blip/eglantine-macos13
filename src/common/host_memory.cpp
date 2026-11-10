@@ -52,6 +52,11 @@
 #endif // ^^^ POSIX ^^^
 
 #include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <unordered_map>
+#include <optional>
+#include <array>
 #include <mutex>
 #include <random>
 
@@ -76,6 +81,7 @@ namespace Common {
 
 [[maybe_unused]] constexpr size_t PageAlignment = 0x1000;
 [[maybe_unused]] constexpr size_t HugePageSize = 0x200000;
+[[maybe_unused]] constexpr size_t HostPage16K = 0x4000;
 
 #ifdef _WIN32
 
@@ -412,7 +418,9 @@ private:
 #define MAP_NOCORE 0
 #endif
 
-#ifdef ARCHITECTURE_arm64
+// Not on macOS: the arena is 2^39 bytes plus alignment, which doesn't fit below 2^39 (its user
+// address space is 47 bits, so any address works).
+#if defined(ARCHITECTURE_arm64) && !defined(__APPLE__)
 
 static void* ChooseVirtualBase(size_t virtual_size) {
     constexpr uintptr_t Map39BitSize = (1ULL << 39);
@@ -529,8 +537,19 @@ public:
 
     bool Init() {
         long page_size = sysconf(_SC_PAGESIZE);
-        if (page_size != 0x1000) {
-            // Apple Silicon (16K pages): guest pages can't be mirrored one to one, so no fastmem.
+        if (page_size == static_cast<long>(HostPage16K)) {
+            // Apple Silicon (16K pages): a host page holds four guest pages. A host page is
+            // mapped only while its four guest pages map four consecutive 4K of backing that
+            // start on a 16K boundary; the rest stay inaccessible and the JIT's fastmem accesses
+            // there fault and fall back to the page table (EDEN_FASTMEM_16K=0 disables fastmem).
+            const char* value = std::getenv("EDEN_FASTMEM_16K");
+            if (value != nullptr && value[0] == '0') {
+                LOG_INFO(HW_Memory, "Host page size {:#x}: fastmem disabled (EDEN_FASTMEM_16K=0)", page_size);
+                return false;
+            }
+            split_pages = true;
+            LOG_INFO(HW_Memory, "Host page size {:#x}: fastmem with 16K host pages", page_size);
+        } else if (page_size != 0x1000) {
             LOG_INFO(HW_Memory, "Host page size {:#x} is not 4K, fastmem disabled", page_size);
             return false;
         }
@@ -541,7 +560,25 @@ public:
         fd = shm_open_anon(O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 #elif defined(__FreeBSD__)
         fd = shm_open(SHM_ANON, O_RDWR, 0600);
-#elif defined(__APPLE__) || defined(__managarm__)
+#elif defined(__APPLE__)
+        // A POSIX shared memory object: anonymous memory (a file in /tmp had its dirty pages
+        // written back to disk).
+        for (int attempt = 0; attempt < 16 && fd < 0; ++attempt) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "/eden-%d-%d", static_cast<int>(getpid()), attempt);
+            fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+            if (fd >= 0) {
+                shm_unlink(name);
+            }
+        }
+        if (fd < 0) {
+            char template_path[] = "/tmp/eden_mem_XXXXXX";
+            fd = mkstemp(template_path);
+            if (fd >= 0) {
+                unlink(template_path);
+            }
+        }
+#elif defined(__managarm__)
         // macOS doesn't have memfd_create, use anonymous temporary file
         char template_path[] = "/tmp/eden_mem_XXXXXX";
         fd = mkstemp(template_path);
@@ -588,6 +625,15 @@ public:
 #if defined(__linux__)
         madvise(virtual_base, virtual_size, MADV_HUGEPAGE);
 #endif
+        if (split_pages) {
+            // Nothing is mapped yet: accesses must fault, not read zeros.
+            void* ret = mmap(virtual_base, virtual_size, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+            if (ret == MAP_FAILED) {
+                LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
+                return false;
+            }
+        }
         free_manager.SetAddressSpace(virtual_base, virtual_size);
         return true;
     }
@@ -605,6 +651,18 @@ public:
     }
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
+        if (split_pages) {
+            const u64 bits = (True(perms & MemoryPermission::Read) ? SubRead : 0) |
+                             (True(perms & MemoryPermission::Write) ? SubWrite : 0);
+            std::scoped_lock lk{split_mutex};
+            for (size_t offset = 0; offset < length; offset += GuestPage) {
+                const size_t address = virtual_offset + offset;
+                split_table[address / HostPage16K][(address / GuestPage) % SubPages] =
+                    (((host_offset + offset) / GuestPage + 1) << SubShift) | bits;
+            }
+            RefreshSplit(virtual_offset, length, false);
+            return;
+        }
         // Intersect the range with our address space.
         AdjustMap(&virtual_offset, &length);
 
@@ -627,6 +685,18 @@ public:
     }
 
     void Unmap(size_t virtual_offset, size_t length) {
+        if (split_pages) {
+            std::scoped_lock lk{split_mutex};
+            for (size_t offset = 0; offset < length; offset += GuestPage) {
+                const size_t address = virtual_offset + offset;
+                const auto it = split_table.find(address / HostPage16K);
+                if (it != split_table.end()) {
+                    it->second[(address / GuestPage) % SubPages] = 0;
+                }
+            }
+            RefreshSplit(virtual_offset, length, false);
+            return;
+        }
         // The method name is wrong. We're still talking about the virtual range.
         // We don't want to unmap, we want to reserve this memory.
 
@@ -642,6 +712,23 @@ public:
     }
 
     void Protect(size_t virtual_offset, size_t length, bool read, bool write, bool execute) {
+        if (split_pages) {
+            const u64 bits = (read ? SubRead : 0) | (write ? SubWrite : 0);
+            std::scoped_lock lk{split_mutex};
+            for (size_t offset = 0; offset < length; offset += GuestPage) {
+                const size_t address = virtual_offset + offset;
+                const auto it = split_table.find(address / HostPage16K);
+                if (it == split_table.end()) {
+                    continue;
+                }
+                u64& entry = it->second[(address / GuestPage) % SubPages];
+                if (entry != 0) {
+                    entry = (entry & ~SubPermMask) | bits;
+                }
+            }
+            RefreshSplit(virtual_offset, length, true);
+            return;
+        }
         // Intersect the range with our address space.
         AdjustMap(&virtual_offset, &length);
 
@@ -714,6 +801,104 @@ private:
 
     int fd{-1}; // memfd file descriptor, -1 is the error value of memfd_create
     FreeRegionManager free_manager{};
+
+    // 16K host pages ---------------------------------------------------------------------------
+    static constexpr size_t GuestPage = 0x1000;
+    static constexpr size_t SubPages = HostPage16K / GuestPage;
+    // A guest page's entry: (backing offset / 4K + 1) << SubShift | permission bits; 0 unmapped.
+    static constexpr u64 SubRead = 1, SubWrite = 2, SubPermMask = 3;
+    static constexpr int SubShift = 2;
+
+    bool split_pages{};
+    std::mutex split_mutex;
+    std::unordered_map<u64, std::array<u64, SubPages>> split_table; ///< By host page index
+
+    /// Whether a host page can be mapped: its guest pages map consecutive backing starting on a
+    /// host page boundary. Returns the backing offset and the protection (the most restrictive).
+    std::optional<std::pair<size_t, int>> MappableHostPage(const std::array<u64, SubPages>& subs) const {
+        const u64 first = subs[0] >> SubShift;
+        if (first == 0 || ((first - 1) * GuestPage) % HostPage16K != 0) {
+            return std::nullopt;
+        }
+        u64 perms = SubPermMask;
+        for (size_t i = 0; i < SubPages; ++i) {
+            if ((subs[i] >> SubShift) != first + i) {
+                return std::nullopt;
+            }
+            perms &= subs[i];
+        }
+        const int prot = ((perms & SubRead) ? PROT_READ : 0) | ((perms & SubWrite) ? PROT_WRITE : 0);
+        return std::make_pair(static_cast<size_t>((first - 1) * GuestPage), prot);
+    }
+
+    /// Brings the host pages under [virtual_offset, +length) in line with the table, coalescing
+    /// neighbours into one call. With only_protect, the mappings themselves are unchanged (a
+    /// protection change): mappable pages get mprotect and the others stay inaccessible.
+    void RefreshSplit(size_t virtual_offset, size_t length, bool only_protect) {
+        if (length == 0) {
+            return;
+        }
+        const u64 first_page = virtual_offset / HostPage16K;
+        const u64 last_page = (virtual_offset + length - 1) / HostPage16K;
+        // Run being collected: kind 0 none, 1 inaccessible, 2 mapped.
+        int run_kind = 0;
+        u64 run_start = 0, run_pages = 0;
+        size_t run_backing = 0;
+        int run_prot = 0;
+        const auto flush = [&] {
+            if (run_kind == 0 || run_pages == 0) {
+                return;
+            }
+            u8* const address = virtual_base + run_start * HostPage16K;
+            const size_t size = run_pages * HostPage16K;
+            if (run_kind == 2) {
+                if (only_protect) {
+                    const int ret = mprotect(address, size, run_prot);
+                    ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
+                } else {
+                    void* ret = mmap(address, size, run_prot, MAP_SHARED | MAP_FIXED, fd,
+                                     static_cast<off_t>(run_backing));
+                    ASSERT_MSG(ret != MAP_FAILED, "mmap: {}", strerror(errno));
+                }
+            } else if (!only_protect) {
+                void* ret = mmap(address, size, PROT_NONE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+                ASSERT_MSG(ret != MAP_FAILED, "mmap: {}", strerror(errno));
+            }
+            run_kind = 0;
+            run_pages = 0;
+        };
+        for (u64 page = first_page; page <= last_page; ++page) {
+            int kind = 1;
+            size_t backing = 0;
+            int prot = PROT_NONE;
+            if (const auto it = split_table.find(page); it != split_table.end()) {
+                bool empty = true;
+                for (const u64 entry : it->second) {
+                    empty &= entry == 0;
+                }
+                if (empty) {
+                    split_table.erase(it);
+                } else if (const auto mappable = MappableHostPage(it->second)) {
+                    kind = 2;
+                    backing = mappable->first;
+                    prot = mappable->second;
+                }
+            }
+            const bool extends =
+                kind == run_kind && run_start + run_pages == page &&
+                (kind != 2 || (prot == run_prot && backing == run_backing + run_pages * HostPage16K));
+            if (!extends) {
+                flush();
+                run_kind = kind;
+                run_start = page;
+                run_backing = backing;
+                run_prot = prot;
+            }
+            ++run_pages;
+        }
+        flush();
+    }
 };
 
 #endif // ^^^ POSIX ^^^
