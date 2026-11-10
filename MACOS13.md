@@ -171,6 +171,9 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
   chooses what skipped frames drop; compute dispatches of at most `EDEN_NX2_FRAME_SKIP_COMPUTE_MAX`
   threads (4096) still run, as do programs listed in `EDEN_NX2_FRAME_SKIP_KEEP=<hash>,...`;
   `EDEN_NX2_FRAME_SKIP_PREP=1` runs all compute on the frame before a drawn one.
+- `EDEN_NX2_PENDING_ACQUIRE=1` lets a semaphore acquire on the GPU thread pass on a release already
+  queued to the host GPU instead of waiting for it. Experimental: in OoT the game corrupted its
+  memory with it (as with GPU accuracy Low), so it is off.
 - `EDEN_FASTMEM_16K_STATS=1` logs how much guest memory fastmem maps directly with 16K pages.
   `DYNARMIC_INLINE_EXCLUSIVES=0` sends exclusive stores through the callbacks again.
 - `EDEN_JIT_MAP=<dir>` writes each core's JIT block map (host address, guest PC) every 10 s and the

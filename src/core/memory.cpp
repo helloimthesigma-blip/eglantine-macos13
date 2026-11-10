@@ -799,7 +799,13 @@ struct Memory::Impl {
     inline void Write(Common::ProcessAddress vaddr, const T data) noexcept requires(std::is_trivially_copyable_v<T>) {
         const u64 addr = GetInteger(vaddr);
         if (auto const ptr = GetPointerImpl(addr, [addr, data]() {
-            LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
+            // As for reads: a guest writing through a bad pointer in a loop logged tens of
+            // gigabytes. Keep the first ones and then a sample.
+            static std::atomic<u64> unmapped_writes{};
+            if (const u64 count = unmapped_writes.fetch_add(1); count < 1000 || count % 100000 == 0) {
+                LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x} (#{})", sizeof(T) * 8,
+                          addr, u64(data), count);
+            }
         }, [&]() { HandleRasterizerWrite(addr, sizeof(T)); }); ptr) [[likely]]
             std::memcpy(ptr, &data, sizeof(T));
     }

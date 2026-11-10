@@ -273,8 +273,12 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
     bool is_synced = (Settings::IsGPUFenceBehaviorDefault() ? !Settings::IsGPULevelHigh() : !Settings::IsGPUFenceBehaviorBalanced() && !Settings::IsGPUFenceBehaviorAccurate()) && is_fence;
+    const bool track_pending = counter_type == QueryType::Payload && Tegra::Nx2PendingReleases::Enabled();
     std::function<void()> operation([this, is_synced, streamer, query_base = query, query_location,
-                                     pointer, pointer_timestamp, cpu_addr] {
+                                     pointer, pointer_timestamp, cpu_addr, track_pending, payload] {
+        if (track_pending) {
+            Tegra::Nx2PendingReleases::Get().Written(cpu_addr, payload);
+        }
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
             if (!is_synced) [[likely]] {
                 impl->pending_unregister.push_back(query_location);
@@ -304,6 +308,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             impl->pending_unregister.push_back(query_location);
         }
     });
+    const bool written_now = !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
+    if (track_pending && !written_now) {
+        Tegra::Nx2PendingReleases::Get().Record(cpu_addr, payload);
+    }
     if (is_fence) {
         impl->rasterizer.SignalFence(std::move(operation));
     } else {

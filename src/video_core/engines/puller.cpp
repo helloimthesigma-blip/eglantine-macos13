@@ -313,6 +313,15 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             return;
         }
+        // Met by a release already queued to the host GPU (see Nx2PendingReleases): no wait.
+        if (Nx2PendingReleases::Enabled()) {
+            if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address)) {
+                if (const auto value = Nx2PendingReleases::Get().Pending(*device);
+                    value && acquire.Matches(*value)) {
+                    return;
+                }
+            }
+        }
         // Registered before the fences run, so a release among them that meets the value counts
         // even if a later one overwrites it.
         auto& waiters = Nx2SemaphoreWaiters::Get();

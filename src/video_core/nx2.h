@@ -3,6 +3,12 @@
 
 #pragma once
 
+#include <cstdlib>
+
+#include <unordered_map>
+
+#include <optional>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -361,6 +367,53 @@ inline u64 Nx2SemaphoreMirror(u64 address) {
 /// Channels suspended on a semaphore acquire. A console channel polls and sees every release;
 /// Eden writes releases in bursts when fences signal and resumes waiters only between command
 /// lists, so an acquire-equal could miss its value. Writes latch the waiters they satisfy.
+/// Semaphore releases the GPU thread has recorded that the host GPU hasn't written yet (with GPU
+/// accuracy High they are written at a fence, once the host GPU gets there). A semaphore acquire on
+/// the GPU thread that one of them meets needs no wait: the host GPU runs the work recorded after
+/// the acquire after the release anyway (one queue, in order). The guest CPU still sees the value
+/// only when it is written. Opt-in (EDEN_NX2_PENDING_ACQUIRE=1): in OoT it let the game corrupt its
+/// memory (some engine work, such as DMA copies, runs on the GPU thread, not in the host queue).
+class Nx2PendingReleases {
+public:
+    static Nx2PendingReleases& Get() {
+        static Nx2PendingReleases releases;
+        return releases;
+    }
+
+    static bool Enabled() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_PENDING_ACQUIRE");
+            return value != nullptr && value[0] == '1';
+        }();
+        return enabled;
+    }
+
+    void Record(u64 device_address, u32 value) {
+        std::scoped_lock lk{mutex};
+        pending[device_address] = value;
+    }
+
+    /// The write of `value` happened (or was dropped): forget it unless a later release is pending.
+    void Written(u64 device_address, u32 value) {
+        std::scoped_lock lk{mutex};
+        if (const auto it = pending.find(device_address); it != pending.end() && it->second == value) {
+            pending.erase(it);
+        }
+    }
+
+    [[nodiscard]] std::optional<u32> Pending(u64 device_address) {
+        std::scoped_lock lk{mutex};
+        if (const auto it = pending.find(device_address); it != pending.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    }
+
+private:
+    std::mutex mutex;
+    std::unordered_map<u64, u32> pending;
+};
+
 class Nx2SemaphoreWaiters {
 public:
     // Puller GpuSemaphoreOperation values.
