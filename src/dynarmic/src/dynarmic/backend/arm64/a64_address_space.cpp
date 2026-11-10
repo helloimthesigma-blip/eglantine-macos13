@@ -375,6 +375,10 @@ static void* EmitExclusiveWrite128CallTrampoline(oaknut::CodeGenerator& code, co
 A64AddressSpace::A64AddressSpace(const A64::UserConfig& conf)
         : AddressSpace(conf.code_cache_size)
         , conf(conf) {
+    if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
+        fast_dispatch_table = std::make_unique<FastDispatchEntry[]>(FastDispatchCount);
+        ClearFastDispatchTable();
+    }
     EmitPrelude();
 }
 
@@ -601,6 +605,8 @@ EmitConfig A64AddressSpace::GetEmitConfig() {
         .absolute_offset_page_table = conf.absolute_offset_page_table,
         .detect_misaligned_access_via_page_table = conf.detect_misaligned_access_via_page_table,
         .only_detect_misalignment_via_page_table_on_page_boundary = conf.only_detect_misalignment_via_page_table_on_page_boundary,
+
+        .fast_dispatch_table_pointer = std::bit_cast<u64>(fast_dispatch_table.get()),
 
         .fastmem_pointer = conf.fastmem_pointer,
         .recompile_on_fastmem_failure = conf.recompile_on_fastmem_failure,

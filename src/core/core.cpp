@@ -77,6 +77,7 @@
 namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
+std::atomic<int> g_nx2_frames_ahead_override{-1};
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {

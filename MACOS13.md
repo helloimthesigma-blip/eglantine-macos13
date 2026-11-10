@@ -64,6 +64,14 @@ Settings → General → UI.
 **Controls** on the status bar, or Emulation → Controls..., opens the button mapping directly
 (keyboard or controller, per player).
 
+### Speed options (Options menu)
+
+Switch 2 games run at the speed they present frames: at 8 fps, a game made for 60 runs at about
+an eighth of its speed (a 45-second cutscene takes minutes). **Options → Frame Skip** lets the
+game keep running while the GPU draws only some of its frames: the picture is choppier, but the
+game itself gets much closer to normal speed. It takes effect immediately and also runs a frame
+ahead. **Run a Frame Ahead** on its own overlaps the game's CPU work with the GPU's.
+
 ## What works (tested with The Legend of Zelda: Ocarina of Time, `0400486024DEC000`)
 
 - The NUP loads with no keys and no firmware.
@@ -74,6 +82,18 @@ Settings → General → UI.
 - A 15-minute run stayed up with no crash or device loss.
 
 ## Performance on an M1 (8-core GPU, 16 GB)
+
+Game speed in Kokiri Forest at 0.5x (frames the game runs per second, of 60), with frame skip
+(running a frame ahead):
+
+| Frame skip | Game speed |
+|---|---|
+| Off | ~8 fps |
+| Draw every 2nd frame | ~20-30 fps |
+| Draw every 3rd frame | ~28-30 fps |
+| Nothing drawn (the CPU limit) | ~43 fps |
+
+Before the CPU work below, the CPU limit was ~21 fps.
 
 - Title screen: 60 fps.
 - Gameplay at 0.5x: about 8-9 fps indoors (~115 ms per frame), ~7 fps outdoors. 0.5x still looks
@@ -97,7 +117,11 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 |---|---|
 | Upstream builds need macOS 15 and a newer libc++ | `tools/macos13/build.sh`: deployment target 13.0, Homebrew LLVM with static libc++ |
 | Heap corruption at startup (two libc++ copies) | Export only `main` from the executables |
-| `assert page size 0x4000 is incompatible with 4K paging` | 16K host pages skip fastmem cleanly |
+| `assert page size 0x4000 is incompatible with 4K paging` | Fastmem with 16K host pages: a host page is mapped while its four guest pages are consecutive backing on a 16K boundary; other accesses fall back to the page table (`EDEN_FASTMEM_16K=0` turns it off) |
+| The game's cores spent ~39% of their busy time spinning on dynarmic's global exclusive-monitor lock | The ARM64 backend now honours `Unsafe_IgnoreGlobalMonitor` (the Auto CPU accuracy sets it): exclusive stores compare and swap, as the x64 backend does |
+| A fault on a 128-bit ordered store in fastmem crashed ("Segfault wasn't at a fastmem patch location") | The patch location is the store, not the barrier before it |
+| Indirect branches always went through the dispatcher's hash lookup | Fast dispatch table for the ARM64 backend (the x64 backend had one) |
+| A slow GPU slows the whole game (its speed follows its frame rate) | Frame skip: skipped frames run the game's commands but drop draws, clears and large compute dispatches, and aren't shown |
 | `eden-cli` could not find MoltenVK | Look next to the executable and in a sibling `eglantine.app` |
 | AV1 movies black (title background, intro) | FFmpeg with dav1d (`tools/macos13/build-ffmpeg-av1.sh`) |
 | Metal validation: uniform bound near the end of the stream buffer could read past it | Pad the stream buffer by 64 KiB |
@@ -136,5 +160,12 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
   `xcrun xctrace record --template 'Metal System Trace'`; `=3` gives every draw its own pass.
 - `EDEN_NX2_IR_DUMP=<hash>,<dir>` writes a compute program's IR; `EDEN_NX2_NAN_SANITIZE=<hash>:<ops>`
   replaces NaN/infinite results of chosen IR operations with 0 (finding NaN sources).
+- `EDEN_NX2_FRAME_SKIP=<n>` draws one frame in n + 1 (a path instead of a number: the file holding
+  n, re-read every 30 frames). `EDEN_NX2_FRAME_SKIP_WORK` (bits: 1 draws, 2 clears, 4 compute)
+  chooses what skipped frames drop; compute dispatches of at most `EDEN_NX2_FRAME_SKIP_COMPUTE_MAX`
+  threads (4096) still run, as do programs listed in `EDEN_NX2_FRAME_SKIP_KEEP=<hash>,...`.
+- `EDEN_JIT_MAP=<dir>` writes each core's JIT block map (host address, guest PC) every 10 s and the
+  guest code once, to attribute `sample` profiles of JIT code to the game's code.
+  `EDEN_NX2_CNTPCT_STATS=1` counts the guest's counter reads (busy-wait loops).
 - `EDEN_UI_SNAPSHOT=<png>` with `QT_QPA_PLATFORM=offscreen` saves the main window (and with
   `EDEN_UI_SNAPSHOT_CONTROLS=<png>` the controls settings) without a display.

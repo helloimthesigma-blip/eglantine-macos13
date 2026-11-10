@@ -180,12 +180,17 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Video Core //
 #include "video_core/gpu.h"
+#include "core/core.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
 #include <SDL3/SDL.h>
 
 #include <boost/container/flat_set.hpp>
+
+namespace {
+void ApplySpeedOptions();
+} // Anonymous namespace
 
 // Platform stuff //
 #include <boost/container/flat_set.hpp>
@@ -600,6 +605,28 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                                grab().save(path);
                                if (const char* controls = std::getenv("EDEN_UI_SNAPSHOT_CONTROLS")) {
                                    SnapshotControls(QString::fromUtf8(controls));
+                               }
+                               // EDEN_UI_SNAPSHOT_MENU=<prefix>: each menu bar menu and its
+                               // submenus as <prefix>-<n>.png.
+                               if (const char* menus = std::getenv("EDEN_UI_SNAPSHOT_MENU")) {
+                                   int n = 0;
+                                   const auto save = [&](QMenu* menu) {
+                                       menu->ensurePolished();
+                                       menu->adjustSize();
+                                       menu->grab().save(QStringLiteral("%1-%2.png")
+                                                             .arg(QString::fromUtf8(menus))
+                                                             .arg(n++));
+                                   };
+                                   for (QAction* action : menuBar()->actions()) {
+                                       if (QMenu* menu = action->menu()) {
+                                           save(menu);
+                                           for (QAction* item : menu->actions()) {
+                                               if (item->menu() != nullptr) {
+                                                   save(item->menu());
+                                               }
+                                           }
+                                       }
+                                   }
                                }
                                if (const char* loading = std::getenv("EDEN_UI_SNAPSHOT_LOADING")) {
                                    loading_screen->resize(1280, 720);
@@ -1663,7 +1690,33 @@ void MainWindow::ConnectMenuEvents() {
             options->addAction(frames_ahead_action);
             connect(frames_ahead_action, &QAction::toggled, this, [](bool checked) {
                 UISettings::values.nx2_frames_ahead.SetValue(checked);
+                ApplySpeedOptions();
             });
+            // Frame skip: Switch 2 games run at the speed they present frames, so on a slow GPU
+            // drawing fewer of them makes the game itself faster (choppier picture).
+            auto* frame_skip_menu = options->addMenu(tr("Frame Skip"));
+            frame_skip_menu->setToolTipsVisible(true);
+            auto* frame_skip_group = new QActionGroup(this);
+            const std::array<std::pair<u32, QString>, 4> frame_skip_choices{{
+                {0, tr("Off (draw every frame)")},
+                {1, tr("Draw every 2nd frame")},
+                {2, tr("Draw every 3rd frame")},
+                {3, tr("Draw every 4th frame")},
+            }};
+            for (const auto& [frames, label] : frame_skip_choices) {
+                auto* action = frame_skip_menu->addAction(label);
+                action->setCheckable(true);
+                action->setChecked(UISettings::values.nx2_frame_skip.GetValue() == frames);
+                action->setToolTip(
+                    tr("The game keeps running at full rate while the GPU draws only some frames: "
+                       "a slowed-down game gets closer to normal speed, with a choppier picture. "
+                       "Also runs a frame ahead. Takes effect immediately."));
+                frame_skip_group->addAction(action);
+                connect(action, &QAction::triggered, this, [frames] {
+                    UISettings::values.nx2_frame_skip.SetValue(frames);
+                    ApplySpeedOptions();
+                });
+            }
             menuBar()->insertMenu(ui->menu_Emulation->menuAction(), options);
             ui->menu_Emulation->setTitle(tr("&Actions"));
             menuBar()->removeAction(ui->menu_Tools->menuAction());
@@ -2032,25 +2085,24 @@ bool MainWindow::SelectAndSetCurrentUser(
 }
 
 namespace {
-// The "Run a Frame Ahead" option, as the environment variable the Switch 2 present reads; a value
-// set outside the app is left alone.
-void ApplyFramesAheadOption() {
-    static bool set_here = false;
-    if (UISettings::values.nx2_frames_ahead.GetValue()) {
-        if (std::getenv("EDEN_NX2_FRAMES_AHEAD") == nullptr || set_here) {
-            setenv("EDEN_NX2_FRAMES_AHEAD", "1", 1);
-            set_here = true;
-        }
-    } else if (set_here) {
-        unsetenv("EDEN_NX2_FRAMES_AHEAD");
-        set_here = false;
+// The "Run a Frame Ahead" and "Frame Skip" options, as the overrides the Switch 2 present and the
+// GPU thread read every frame (so a change applies at once). Frame skip implies running ahead:
+// skipped frames are cheap, and waiting for each one would waste most of the gain.
+void ApplySpeedOptions() {
+    const u32 frame_skip = UISettings::values.nx2_frame_skip.GetValue();
+    Tegra::Nx2SetFrameSkip(static_cast<int>(frame_skip));
+    if (UISettings::values.nx2_frames_ahead.GetValue() || frame_skip != 0) {
+        Core::g_nx2_frames_ahead_override.store(1);
+    } else {
+        // Unset: EDEN_NX2_FRAMES_AHEAD, or each title's default.
+        Core::g_nx2_frames_ahead_override.store(-1);
     }
 }
 } // Anonymous namespace
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type, bool allow_recommended_settings_prompt) {
-    ApplyFramesAheadOption();
+    ApplySpeedOptions();
     if (nup_running && filename.toStdString() == nup_source_path) {
         QMessageBox::information(this, tr("Conversion in Progress"),
                                  tr("This game cannot be started while its dump is being "

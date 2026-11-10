@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <tuple>
+#include <unordered_map>
 #include <algorithm>
 #include <chrono>
 #include <atomic>
@@ -37,6 +39,8 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/k_process.h"
 #include "core/perf_stats.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
@@ -726,6 +730,30 @@ static void LogFrameRate(Core::System& system) {
         return;
     }
     last = now;
+    // EDEN_NX2_THREAD_STATS=1: each guest thread's share of CPU time over the last 5 s (debug: the
+    // list is read without the kernel's lock).
+    static const bool thread_stats = std::getenv("EDEN_NX2_THREAD_STATS") != nullptr;
+    if (thread_stats && system.ApplicationProcess() != nullptr) {
+        static std::unordered_map<u64, s64> previous;
+        std::vector<std::tuple<s64, u64, s32, s32>> rows;
+        s64 total = 0;
+        for (auto& thread : system.ApplicationProcess()->GetThreadList()) {
+            const s64 time = thread.GetCpuTime();
+            const s64 delta = time - previous[thread.GetThreadId()];
+            previous[thread.GetThreadId()] = time;
+            total += delta;
+            rows.emplace_back(delta, thread.GetThreadId(), thread.GetPriority(),
+                              thread.GetActiveCore());
+        }
+        std::sort(rows.begin(), rows.end(), std::greater<>{});
+        std::string text;
+        for (size_t i = 0; i < rows.size() && i < 12; ++i) {
+            const auto& [delta, id, priority, core] = rows[i];
+            text += fmt::format(" | #{} p{} c{} {:.1f}%", id, priority, core,
+                                total > 0 ? 100.0 * static_cast<double>(delta) / static_cast<double>(total) : 0.0);
+        }
+        LOG_INFO(Frontend, "Guest threads by CPU time (total {} ticks){}", total, text);
+    }
     const auto results = system.GetAndResetPerfStats();
     LOG_INFO(Frontend, "Frame rate: game {:.1f} fps, frame {:.1f} ms, speed {:.0f}%",
              results.average_game_fps, results.frametime * 1000.0,

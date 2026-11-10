@@ -49,15 +49,19 @@ namespace Tegra {
 namespace {
 std::atomic<bool> g_nx2_skip_frame_work{};
 std::atomic<bool> g_nx2_shown_frame_skipped{};
+std::atomic<int> g_nx2_frame_skip_override{-1};
 
 /// Called on the GPU thread at each composite. Returns whether the frame that just ended was
 /// skipped (so it isn't shown), and decides whether the next one is.
 bool Nx2EndFrame() {
     static u64 frames{};
     static u64 skip{};
-    // A value starting with '/' names a file holding the number, read every 30 frames (lets test
-    // runs change it while the game runs).
-    if (const char* value = std::getenv("EDEN_NX2_FRAME_SKIP"); value == nullptr) {
+    // The app's setting first; else EDEN_NX2_FRAME_SKIP. A value starting with '/' names a file
+    // holding the number, read every 30 frames (lets test runs change it while the game runs).
+    const char* value = std::getenv("EDEN_NX2_FRAME_SKIP");
+    if (const int app = g_nx2_frame_skip_override.load(std::memory_order_relaxed); app >= 0) {
+        skip = static_cast<u64>(app);
+    } else if (value == nullptr) {
         skip = 0;
     } else if (value[0] != '/') {
         skip = std::strtoull(value, nullptr, 10);
@@ -80,6 +84,10 @@ bool Nx2EndFrame() {
 
 bool Nx2SkippingFrameWork() {
     return g_nx2_skip_frame_work.load(std::memory_order_relaxed);
+}
+
+void Nx2SetFrameSkip(int frames) {
+    g_nx2_frame_skip_override.store(frames, std::memory_order_relaxed);
 }
 
 bool Nx2ComposingSkippedFrame() {

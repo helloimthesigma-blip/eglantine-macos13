@@ -101,10 +101,35 @@ void EmitA64Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Po
     EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
 }
 
-void EmitA64Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool) {
-    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+void EmitA64Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool is_single_step) {
+    // Indirect branches: look the target up in the fast dispatch table (filled by the dispatcher)
+    // and branch straight to it; on a miss, or with a halt pending, go through the dispatcher.
+    if (ctx.conf.fast_dispatch_table_pointer != 0 && ctx.conf.HasOptimization(OptimizationFlag::FastDispatch) && !is_single_step) {
+        oaknut::Label fail;
 
-    // TODO: Implement FastDispatchHint optimization
+        code.LDAR(Wscratch0, Xhalt);
+        code.CBNZ(Wscratch0, fail);
+
+        code.MOV(Wscratch0, A64::LocationDescriptor::fpcr_mask);
+        code.LDR(W0, Xstate, offsetof(A64JitState, fpcr));
+        code.LDR(X1, Xstate, offsetof(A64JitState, pc));
+        code.AND(W0, W0, Wscratch0);
+        code.AND(X1, X1, A64::LocationDescriptor::pc_mask);
+        code.LSL(X0, X0, A64::LocationDescriptor::fpcr_shift);
+        code.ORR(X0, X0, X1);
+
+        code.UBFX(Xscratch0, X0, 2, FastDispatchBits);
+        code.LSL(Xscratch0, Xscratch0, 4);
+        code.MOV(Xscratch1, ctx.conf.fast_dispatch_table_pointer);
+        code.ADD(Xscratch1, Xscratch1, Xscratch0);
+        code.LDP(Xscratch0, X1, Xscratch1);
+        code.CMP(X0, Xscratch0);
+        code.B(NE, fail);
+        code.BR(X1);
+
+        code.l(fail);
+    }
+    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
 }
 
 void EmitA64Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::If terminal, IR::LocationDescriptor initial_location, bool is_single_step) {

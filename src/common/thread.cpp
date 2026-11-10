@@ -16,6 +16,7 @@
 #include "common/assert.h"
 #include "common/thread.h"
 #ifdef __APPLE__
+#include <pthread/qos.h>
 #include <mach/mach.h>
 #elif defined(__HAIKU__)
 #include <kernel/OS.h>
@@ -491,6 +492,18 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
                   GetLastErrorMsg());
     }
 #else
+#ifdef __APPLE__
+    // Apple Silicon: the QoS class decides between performance and efficiency cores. The emulated
+    // CPU cores and the GPU thread (High, Critical) ask for performance cores; an M1 has only four
+    // and these threads otherwise often ran on the efficiency cores. EDEN_QOS=0 turns it off.
+    static const bool use_qos = [] {
+        const char* value = std::getenv("EDEN_QOS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (use_qos && new_priority >= ThreadPriority::High) {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+#endif
     const s32 max_prio = sched_get_priority_max(SCHED_OTHER);
     const s32 min_prio = sched_get_priority_min(SCHED_OTHER);
     if (max_prio > min_prio) {

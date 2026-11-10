@@ -100,6 +100,9 @@ struct Values {
     /// Switch 2 games run a frame ahead (EDEN_NX2_FRAMES_AHEAD=1): faster, but Ocarina of
     /// Time's fog can flicker. Read when a game starts.
     Setting<bool> nx2_frames_ahead{linkage, false, "nx2FramesAhead", Category::Ui};
+    /// Switch 2 frame skip: draw one frame in n + 1, so a game whose speed follows its frame rate
+    /// runs closer to full speed on a slow GPU. Also runs a frame ahead.
+    Setting<u32> nx2_frame_skip{linkage, 0, "nx2FrameSkip", Category::Ui};
 
     SwitchableSetting<ConfirmStop> confirm_before_stopping{linkage,
                                                            ConfirmStop::Ask_Always,

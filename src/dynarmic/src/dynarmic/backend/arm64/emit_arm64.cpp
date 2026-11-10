@@ -264,6 +264,10 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     code.BRK(0);
 
     ebi.size = code.xptr<CodePtr>() - ebi.entry_point;
+    std::sort(ebi.fastmem_patch_info.begin(), ebi.fastmem_patch_info.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    ebi.fastmem_patch_info.shrink_to_fit();
+    ebi.block_relocations.shrink_to_fit();
     return ebi;
 }
 
@@ -273,7 +277,14 @@ void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget li
 }
 
 void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type) {
-    ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
+    const BlockRelocation relocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type};
+    auto& lists = ctx.ebi.block_relocations;
+    const auto it = std::find_if(lists.begin(), lists.end(), [&](const auto& entry) { return entry.first == descriptor; });
+    if (it != lists.end()) {
+        it->second.push_back(relocation);
+    } else {
+        lists.emplace_back(descriptor, std::vector<BlockRelocation>{relocation});
+    }
     switch (type) {
     case BlockRelocationType::Branch:
         code.NOP();

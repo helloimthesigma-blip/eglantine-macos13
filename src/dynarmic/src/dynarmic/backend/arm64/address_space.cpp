@@ -7,6 +7,8 @@
  */
 
 #include <cstring>
+#include <cstdlib>
+#include <atomic>
 #include <cstdio>
 
 #include <bit>
@@ -68,12 +70,15 @@ CodePtr AddressSpace::ReverseGetEntryPoint(CodePtr host_pc) {
 }
 
 CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
-    if (CodePtr block_entry = Get(descriptor)) {
-        return block_entry;
+    CodePtr block_entry = Get(descriptor);
+    if (!block_entry) {
+        GenerateIR(ir_block, descriptor);
+        block_entry = Emit(std::move(ir_block)).entry_point;
     }
-    GenerateIR(ir_block, descriptor);
-    const EmittedBlockInfo block_info = Emit(std::move(ir_block));
-    return block_info.entry_point;
+    if (fast_dispatch_table) {
+        fast_dispatch_table[FastDispatchIndex(descriptor.Value())] = {descriptor.Value(), block_entry};
+    }
+    return block_entry;
 }
 
 void AddressSpace::InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& descriptors) {
@@ -91,11 +96,20 @@ void AddressSpace::InvalidateBasicBlocks(const ::Common::unordered_set<IR::Locat
 
         block_entries.erase(iter);
     }
+    if (fast_dispatch_table) {
+        for (const auto& descriptor : descriptors) {
+            auto& entry = fast_dispatch_table[FastDispatchIndex(descriptor.Value())];
+            if (entry.location == descriptor.Value()) {
+                entry = {~u64{0}, nullptr};
+            }
+        }
+    }
 
     ProtectCodeMemory();
 }
 
 void AddressSpace::ClearCache() {
+    ClearFastDispatchTable();
     block_entries.clear();
     reverse_block_entries.clear();
     block_infos.clear();
@@ -118,9 +132,15 @@ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
 
     ASSERT(block_entries.insert({block.Location(), block_info.entry_point}).second);
     ASSERT(reverse_block_entries.insert({block_info.entry_point, block.Location()}).second);
-    ASSERT(block_infos.insert({block_info.entry_point, block_info}).second);
 
     Link(block_info);
+    {
+        // The relocations to the prelude are only needed by Link.
+        EmittedBlockInfo stored = block_info;
+        stored.relocations.clear();
+        stored.relocations.shrink_to_fit();
+        ASSERT(block_infos.insert({block_info.entry_point, std::move(stored)}).second);
+    }
     RelinkForDescriptor(block.Location(), block_info.entry_point);
 
     mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
@@ -311,8 +331,8 @@ void AddressSpace::RelinkForDescriptor(IR::LocationDescriptor target_descriptor,
         if (auto block_iter = block_infos.find(code_ptr); block_iter != block_infos.end()) {
             const EmittedBlockInfo& block_info = block_iter->second;
 
-            if (auto relocation_iter = block_info.block_relocations.find(target_descriptor); relocation_iter != block_info.block_relocations.end()) {
-                LinkBlockLinks(block_info.entry_point, target_ptr, relocation_iter->second);
+            if (const auto* relocations = block_info.FindBlockRelocations(target_descriptor)) {
+                LinkBlockLinks(block_info.entry_point, target_ptr, *relocations);
             }
 
             mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
@@ -334,15 +354,26 @@ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
             goto fail;
         }
 
-        const auto patch_entry = block_info->second.fastmem_patch_info.find(host_ptr - entry_point);
-        if (patch_entry == block_info->second.fastmem_patch_info.end()) {
+        const FastmemPatchInfo* const patch = block_info->second.FindFastmemPatch(host_ptr - entry_point);
+        if (patch == nullptr) {
             goto fail;
         }
 
-        const auto fc = patch_entry->second.fc;
+        const auto fc = patch->fc;
 
-        if (patch_entry->second.recompile) {
-            const auto marker = patch_entry->second.marker;
+        // DYNARMIC_FASTMEM_STATS=1: report every 256th fastmem fault (each one recompiles a block
+        // without fastmem for that access).
+        static const bool stats = std::getenv("DYNARMIC_FASTMEM_STATS") != nullptr;
+        if (stats) {
+            static std::atomic<u64> faults{};
+            if ((faults.fetch_add(1, std::memory_order_relaxed) & 255) == 0) {
+                fmt::print("dynarmic: {} fastmem faults so far\n", faults.load());
+                std::fflush(stdout);
+            }
+        }
+
+        if (patch->recompile) {
+            const auto marker = patch->marker;
             fastmem_manager.MarkDoNotFastmem(marker);
             InvalidateBasicBlocks({std::get<0>(marker)});
         }

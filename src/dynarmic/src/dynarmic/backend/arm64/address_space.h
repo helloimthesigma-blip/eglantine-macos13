@@ -9,6 +9,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <optional>
 
 #include "common/common_types.h"
@@ -91,6 +92,29 @@ protected:
 
     ExceptionHandler exception_handler;
     FastmemManager fastmem_manager;
+
+public:
+    /// Fast dispatch (indirect branches): a direct-mapped cache of location -> code that emitted
+    /// code checks before returning to the dispatcher.
+    struct FastDispatchEntry {
+        u64 location;
+        CodePtr code;
+    };
+    static constexpr std::size_t FastDispatchCount = std::size_t{1} << FastDispatchBits;
+    static constexpr std::size_t FastDispatchIndex(u64 location) {
+        return (location >> 2) & (FastDispatchCount - 1);
+    }
+
+protected:
+    std::unique_ptr<FastDispatchEntry[]> fast_dispatch_table;
+    void ClearFastDispatchTable() {
+        if (!fast_dispatch_table) {
+            return;
+        }
+        for (std::size_t i = 0; i < FastDispatchCount; ++i) {
+            fast_dispatch_table[i] = {~u64{0}, nullptr};
+        }
+    }
 
     struct PreludeInfo {
         std::ptrdiff_t end_of_prelude;

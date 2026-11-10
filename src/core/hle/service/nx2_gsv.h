@@ -1762,6 +1762,10 @@ private:
         // EDEN_NX2_FRAMES_AHEAD=1 always waits for the previous frame, =0 always for this one.
         // Read on every present: the Qt app sets it when a game starts.
         const int frames_ahead_setting = [] {
+            if (const int app = Core::g_nx2_frames_ahead_override.load(std::memory_order_relaxed);
+                app >= 0) {
+                return app;
+            }
             const char* value = std::getenv("EDEN_NX2_FRAMES_AHEAD");
             // "auto": the default mode (-1) even for the titles below that pick their own.
             return value == nullptr                 ? -1

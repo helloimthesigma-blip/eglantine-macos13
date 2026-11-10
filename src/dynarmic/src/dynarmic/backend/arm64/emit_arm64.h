@@ -8,6 +8,10 @@
 
 #pragma once
 
+#include <utility>
+
+#include <algorithm>
+
 #include <array>
 #include <cstddef>
 #include <memory>
@@ -105,9 +109,29 @@ struct EmittedBlockInfo {
     CodePtr entry_point;
     std::size_t size;
     std::vector<Relocation> relocations;
-    ::Common::unordered_map<IR::LocationDescriptor, std::vector<BlockRelocation>> block_relocations;
-    ::Common::unordered_map<std::ptrdiff_t, FastmemPatchInfo> fastmem_patch_info;
+    // Vectors, not hash maps: a block has a few link targets and patch locations, and a map's
+    // first allocation (~0.5 KiB) on each of hundreds of thousands of blocks per core took gigabytes.
+    std::vector<std::pair<IR::LocationDescriptor, std::vector<BlockRelocation>>> block_relocations;
+    /// Sorted by offset.
+    std::vector<std::pair<std::ptrdiff_t, FastmemPatchInfo>> fastmem_patch_info;
+
+    const std::vector<BlockRelocation>* FindBlockRelocations(IR::LocationDescriptor descriptor) const {
+        for (const auto& [target, list] : block_relocations) {
+            if (target == descriptor) {
+                return &list;
+            }
+        }
+        return nullptr;
+    }
+    const FastmemPatchInfo* FindFastmemPatch(std::ptrdiff_t offset) const {
+        const auto it = std::lower_bound(fastmem_patch_info.begin(), fastmem_patch_info.end(), offset,
+                                         [](const auto& entry, std::ptrdiff_t value) { return entry.first < value; });
+        return it != fastmem_patch_info.end() && it->first == offset ? &it->second : nullptr;
+    }
 };
+
+/// Index bits of the fast dispatch table (AddressSpace::fast_dispatch_table).
+constexpr std::size_t FastDispatchBits = 16;
 
 struct EmitConfig {
     OptimizationFlag optimizations;
@@ -136,6 +160,9 @@ struct EmitConfig {
     bool absolute_offset_page_table;
     u8 detect_misaligned_access_via_page_table;
     bool only_detect_misalignment_via_page_table_on_page_boundary;
+
+    // Fast dispatch: a direct-mapped table of (location, code) for indirect branches, or 0
+    u64 fast_dispatch_table_pointer = 0;
 
     // Fastmem
     std::optional<u64> fastmem_pointer;
