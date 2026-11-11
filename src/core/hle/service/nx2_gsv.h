@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <thread>
 #include <chrono>
 #include <condition_variable>
@@ -71,6 +72,7 @@
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/nx2_movie_pacing.h"
+#include "core/hle/service/nx2_oot_time.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
@@ -1818,6 +1820,17 @@ private:
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess());
         const auto paced = std::chrono::steady_clock::now();
+        // Ocarina of Time (with its built-in real-time patch) steps by the measured frame time.
+        if (const auto* const process = system.ApplicationProcess(); process != nullptr) {
+            if (const u64 address = process->GetOotDeltaAddress(); address != 0) {
+                const float delta =
+                    Nx2OotTime::Enabled() ? m_oot_frame_delta.Update(entered) : 1.0f;
+                system.ApplicationMemory().Write32(address, std::bit_cast<u32>(delta));
+                Nx2OotTime::g_delta_milli_total.fetch_add(static_cast<u64>(delta * 1000.0f),
+                                                          std::memory_order_relaxed);
+                Nx2OotTime::g_delta_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         // Where each frame's time goes on the present thread, averaged per 600 presents: the
         // game is blocked here while Eden's GPU thread catches up (fence) and composites.
         {
@@ -1870,6 +1883,7 @@ private:
         u32 presents{}, ran_ahead{};
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
+    Nx2OotTime::FrameDelta m_oot_frame_delta;
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
 

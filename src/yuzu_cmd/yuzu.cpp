@@ -24,6 +24,7 @@
 #include <regex>
 #include <string>
 #include "common/settings_enums.h"
+#include "core/hle/service/nx2_oot_time.h"
 #include "core/launch_params.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -755,9 +756,24 @@ static void LogFrameRate(Core::System& system) {
         LOG_INFO(Frontend, "Guest threads by CPU time (total {} ticks){}", total, text);
     }
     const auto results = system.GetAndResetPerfStats();
-    LOG_INFO(Frontend, "Frame rate: game {:.1f} fps, frame {:.1f} ms, speed {:.0f}%",
+    // Ocarina of Time's real-time patch: its game time per frame, so the game's speed (1.0 = full)
+    // is fps * average delta / 60.
+    static u64 last_delta_total = 0, last_delta_count = 0;
+    const u64 delta_total = Service::Nx2OotTime::g_delta_milli_total.load();
+    const u64 delta_count = Service::Nx2OotTime::g_delta_count.load();
+    const double average_delta =
+        delta_count > last_delta_count
+            ? static_cast<double>(delta_total - last_delta_total) / 1000.0 /
+                  static_cast<double>(delta_count - last_delta_count)
+            : 1.0;
+    last_delta_total = delta_total;
+    last_delta_count = delta_count;
+    LOG_INFO(Frontend,
+             "Frame rate: game {:.1f} fps, frame {:.1f} ms, speed {:.0f}%, delta {:.2f}, "
+             "real {:.1f} fps-equivalent",
              results.average_game_fps, results.frametime * 1000.0,
-             results.emulation_speed * 100.0);
+             results.emulation_speed * 100.0, average_delta,
+             results.average_game_fps * average_delta);
 }
 
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {

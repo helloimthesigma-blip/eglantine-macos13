@@ -3,6 +3,7 @@
 
 // Static Qt on macOS doesn't use Vulkan
 // Other platforms do, and thus have conflicting VulkanMemoryAllocator symbols
+#include "core/hle/service/nx2_oot_time.h"
 #include "core/launch_params.h"
 #if defined(QT_STATICPLUGIN) && !defined(__APPLE__)
 #undef VMA_IMPLEMENTATION
@@ -5037,6 +5038,22 @@ void MainWindow::UpdateStatusBar() {
     }
 
     QString fpsText = tr("Game: %1 FPS").arg(std::round(results.average_game_fps), 0, 'f', 0);
+    {
+        // Ocarina of Time's real-time patch steps the game by the measured frame time: show how
+        // fast the game itself runs (100% = full speed) next to its frame rate.
+        static u64 last_delta_total = 0, last_delta_count = 0;
+        const u64 delta_total = Service::Nx2OotTime::g_delta_milli_total.load();
+        const u64 delta_count = Service::Nx2OotTime::g_delta_count.load();
+        if (delta_count > last_delta_count) {
+            const double average_delta = static_cast<double>(delta_total - last_delta_total) /
+                                         1000.0 / static_cast<double>(delta_count - last_delta_count);
+            const double speed =
+                (std::min)(100.0, results.average_game_fps * average_delta / 60.0 * 100.0);
+            fpsText = fpsText % QStringLiteral(" | ") % tr("Game speed: %1%").arg(speed, 0, 'f', 0);
+        }
+        last_delta_total = delta_total;
+        last_delta_count = delta_count;
+    }
     if (!m_fpsSuffix.isEmpty())
         fpsText = fpsText % QStringLiteral(" (%1)").arg(m_fpsSuffix);
 
