@@ -1547,7 +1547,32 @@ void RasterizerVulkan::DispatchCompute() {
                 const char* value = std::getenv("EDEN_NX2_FRAME_SKIP_NEW_PROGRAMS");
                 return value != nullptr && value[0] == '1';
             }();
-            const bool every_frame = !new_programs || g_frame_skip_targets.SeenLastDrawn(hash ^ 0xC0C0C0C0ULL);
+            const bool seen_last_drawn = !new_programs || g_frame_skip_targets.SeenLastDrawn(hash ^ 0xC0C0C0C0ULL);
+            // Only recurring work is dropped: a program that ran in at least 6 skipped frames, the
+            // last within 8 frames. New and rare programs run (OoT sets up an area's sky and
+            // lighting with one-time dispatches as it loads; dropped, the area stayed dark and
+            // purple until the next load).
+            bool recurring = false;
+            {
+                struct Runs {
+                    u64 last_frame;
+                    u32 frames;
+                };
+                static std::mutex runs_mutex;
+                static std::unordered_map<u64, Runs> runs;
+                const u64 frame = Tegra::Nx2FrameNumber();
+                std::scoped_lock runs_lock{runs_mutex};
+                auto [it, inserted] = runs.try_emplace(hash, Runs{frame, 1});
+                if (!inserted) {
+                    Runs& entry = it->second;
+                    recurring = entry.frames >= 6 && frame - entry.last_frame <= 8;
+                    if (frame != entry.last_frame) {
+                        entry.frames = frame - entry.last_frame <= 8 ? entry.frames + 1 : 1;
+                        entry.last_frame = frame;
+                    }
+                }
+            }
+            const bool every_frame = seen_last_drawn && recurring;
             if (!writes_buffers && every_frame && std::find(keep.begin(), keep.end(), hash) == keep.end()) {
                 static std::mutex seen_mutex;
                 static std::unordered_set<u64> seen;
