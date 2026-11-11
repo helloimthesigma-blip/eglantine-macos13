@@ -72,6 +72,13 @@ game keep running while the GPU draws only some of its frames: the picture is ch
 game itself gets much closer to normal speed. It takes effect immediately and also runs a frame
 ahead. **Run a Frame Ahead** on its own overlaps the game's CPU work with the GPU's.
 
+**Ocarina of Time runs in real time** below 60 fps with a built-in patch ported from upstream
+Eglantine (c6d2acd37a): the game normally steps a fixed 1/60 s per frame, and the patch makes
+it step by the measured frame time instead (up to 4/60 s), so at 15+ fps it plays at full speed,
+just less smoothly. The status bar shows "Game speed: N%". Turn it off in the game's Add-Ons
+("Real-time speed (built-in)") or with `EDEN_NX2_OOT_REAL_TIME=0`. Upstream's Max Resolution
+patch is not included: on a slow GPU the game's dynamic resolution helps.
+
 ## What works (tested with The Legend of Zelda: Ocarina of Time, `0400486024DEC000`)
 
 - The NUP loads with no keys and no firmware.
@@ -86,11 +93,15 @@ ahead. **Run a Frame Ahead** on its own overlaps the game's CPU work with the GP
 Game speed in Kokiri Forest at 0.5x (frames the game runs per second, of 60; running a frame
 ahead):
 
-| Frame skip | Game speed |
-|---|---|
-| Off | ~12 fps (8 before this work) |
-| Draw every 3rd frame | ~30 fps |
-| Draw every 4th frame | ~28 fps |
+| Frame skip | Frames per second | Game speed with the real-time patch |
+|---|---|---|
+| Off | ~12 fps (8 before this work) | up to ~80% (each frame steps at most 4/60 s) |
+| Draw every 3rd frame | ~30-33 fps | ~100% (delta ~1.8, 59-61 fps-equivalent) |
+| Draw every 4th frame | ~28 fps | ~93-100% |
+
+Upstream's hot-page and GPU translation cache commits (f27522bfb9, b1e650849e) were tried and
+reverted: no measurable gain on the M1, and 2 of 13 boots with them went bad (a GPU hang on a
+semaphore that read 0, and a crash on garbage GPU commands) against 0 of 7 without.
 
 - Title screen: 60 fps.
 - Gameplay at 0.5x: about 8-9 fps indoors (~115 ms per frame), ~7 fps outdoors. 0.5x still looks
