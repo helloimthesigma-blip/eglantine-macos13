@@ -450,13 +450,18 @@ struct GPU::Impl {
         pending_composite_fence = RequestSyncOperation(
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
              composite_fences = std::move(fences)] {
-                g_nx2_shown_frame_skipped.store(Nx2EndFrame(), std::memory_order_relaxed);
+                // Whether this frame was skipped, carried to its composite: a composite waiting on
+                // fences runs later, after the next frame's request (frame-ahead) has ended that
+                // frame. Read from one shared flag then, drawn frames were kept off screen and
+                // skipped ones (only their UI drawn) shown: a black or frozen 3D picture.
+                const bool skipped = Nx2EndFrame();
                 if (num_fences == 0) {
+                    g_nx2_shown_frame_skipped.store(skipped, std::memory_order_relaxed);
                     renderer->Composite(composite_layers);
                     return;
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
-                const auto executer = [this, current_request_counter, composite_layers]() {
+                const auto executer = [this, current_request_counter, composite_layers, skipped]() {
                     {
                         std::unique_lock<std::mutex> lk(request_swap_mutex);
                         if (--request_swap_counters[current_request_counter] != 0) {
@@ -464,6 +469,7 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
+                    g_nx2_shown_frame_skipped.store(skipped, std::memory_order_relaxed);
                     renderer->Composite(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {

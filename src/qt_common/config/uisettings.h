@@ -103,6 +103,9 @@ struct Values {
     /// Switch 2 frame skip: draw one frame in n + 1, so a game whose speed follows its frame rate
     /// runs closer to full speed on a slow GPU. Also runs a frame ahead.
     Setting<u32> nx2_frame_skip{linkage, 0, "nx2FrameSkip", Category::Ui};
+    /// Ocarina of Time's real-time speed: the most 60ths of a second one frame may step (4: full
+    /// speed down to 15 fps, below that the game slows down; 12: down to 5 fps).
+    Setting<u32> nx2_oot_max_step{linkage, 4, "nx2OotMaxStep", Category::Ui};
 
     SwitchableSetting<ConfirmStop> confirm_before_stopping{linkage,
                                                            ConfirmStop::Ask_Always,

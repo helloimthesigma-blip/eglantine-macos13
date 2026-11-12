@@ -119,7 +119,8 @@ namespace Core {
 /// Frames the guest has presented (Switch 2 vi2 present calls); input replay is locked to it.
 extern std::atomic<u64> g_nx2_present_count;
 /// Running a frame ahead on Switch 2 titles as set in the app: -1 unset (EDEN_NX2_FRAMES_AHEAD
-/// decides), 0 off, 1 on. Read on every present.
+/// decides), 0 off, 1 on, 2 on for frame skip (on, except titles that render wrong a frame
+/// ahead). Read on every present.
 extern std::atomic<int> g_nx2_frames_ahead_override;
 
 class CpuManager;

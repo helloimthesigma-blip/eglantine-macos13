@@ -69,15 +69,26 @@ Settings → General → UI.
 Switch 2 games run at the speed they present frames: at 8 fps, a game made for 60 runs at about
 an eighth of its speed (a 45-second cutscene takes minutes). **Options → Frame Skip** lets the
 game keep running while the GPU draws only some of its frames: the picture is choppier, but the
-game itself gets much closer to normal speed. It takes effect immediately and also runs a frame
-ahead. **Run a Frame Ahead** on its own overlaps the game's CPU work with the GPU's.
+game itself gets closer to normal speed. It takes effect immediately and also runs a frame ahead,
+except in Ocarina of Time (see below). **Run a Frame Ahead** on its own overlaps the game's CPU
+work with the GPU's.
 
 **Ocarina of Time runs in real time** below 60 fps with a built-in patch ported from upstream
 Eglantine (c6d2acd37a): the game normally steps a fixed 1/60 s per frame, and the patch makes
-it step by the measured frame time instead (up to 4/60 s), so at 15+ fps it plays at full speed,
-just less smoothly. The status bar shows "Game speed: N%". Turn it off in the game's Add-Ons
-("Real-time speed (built-in)") or with `EDEN_NX2_OOT_REAL_TIME=0`. Upstream's Max Resolution
-patch is not included: on a slow GPU the game's dynamic resolution helps.
+it step by the measured frame time instead. The status bar shows "Game speed: N%". Turn it off in
+the game's Add-Ons ("Real-time speed (built-in)") or with `EDEN_NX2_OOT_REAL_TIME=0`. Upstream's
+Max Resolution patch is not included: on a slow GPU the game's dynamic resolution helps.
+
+**Options → Ocarina of Time Speed** sets the largest step one frame may take: Normal (4/60 s, full
+speed down to 15 fps; below that the game slows down), Faster (8/60 s, down to 7.5 fps) or Full
+speed down to 5 fps (12/60 s, experimental). Walking, the camera, ladders and running into a tree
+were checked at 6, 8 and 12; fast action (combat, long jumps) has not been. `EDEN_NX2_OOT_MAX_DELTA`
+does the same for `eden-cli`.
+
+Ocarina of Time a frame ahead renders each frame with data the game already wrote for the next
+one (one-frame white or overexposed flashes). With frame skip those frames were the only ones shown,
+so the 3D picture stayed black or blown out while the HUD updated: frame skip no longer runs it a
+frame ahead (`EDEN_NX2_FRAMES_AHEAD=2` is frame skip's mode for `eden-cli`).
 
 ## What works (tested with The Legend of Zelda: Ocarina of Time, `0400486024DEC000`)
 
@@ -90,23 +101,28 @@ patch is not included: on a slow GPU the game's dynamic resolution helps.
 
 ## Performance on an M1 (8-core GPU, 16 GB)
 
-Game speed in Kokiri Forest at 0.5x (frames the game runs per second, of 60; running a frame
-ahead):
+Kokiri Forest gameplay, handheld, 0.5x, `eden-cli` with a hidden window (60 fps-equivalent =
+full speed):
 
-| Frame skip | Frames per second | Game speed with the real-time patch |
-|---|---|---|
-| Off | ~12 fps (8 before this work) | up to ~80% (each frame steps at most 4/60 s) |
-| Draw every 3rd frame | ~30-33 fps | ~100% (delta ~1.8, 59-61 fps-equivalent) |
-| Draw every 4th frame | ~28 fps | ~93-100% |
+| Setting | Frames per second | Frames shown | Game speed |
+|---|---|---|---|
+| Normal | ~5.5 | ~5.5 | ~21 fps-equivalent (35%) |
+| Draw every 3rd frame | ~10.5 | ~3.5 | ~41 (68%) |
+| OoT Speed: full speed down to 5 fps | ~5.5 | ~5.5 | ~60 (100%) |
+
+In the app (docked, 0.5x) the last one showed "Game speed: 80-100%" at 4-5 fps.
+
+The GPU is the limit: ~93% busy during gameplay. Frame time barely follows the resolution (0.25x
+~157 ms, 0.5x ~180 ms, 1x ~235 ms): most of it is per-draw and geometry work (about 11,400 draws a
+frame, 9,300 of them with one simple position-only vertex program) plus one lighting pass whose
+fragment program reads memory through ~112 global-memory lookups per pixel (~16 ms, not scaled by
+the resolution setting).
 
 Upstream's hot-page and GPU translation cache commits (f27522bfb9, b1e650849e) were tried and
 reverted: no measurable gain on the M1, and 2 of 13 boots with them went bad (a GPU hang on a
 semaphore that read 0, and a crash on garbage GPU commands) against 0 of 7 without.
 
 - Title screen: 60 fps.
-- Gameplay at 0.5x: about 8-9 fps indoors (~115 ms per frame), ~7 fps outdoors. 0.5x still looks
-  clean and is the setting to use on a base M1. Options → "Run a Frame Ahead" makes it ~20-30%
-  faster (0.5x indoors ~83 ms per frame) but OOT's fog then flickers outdoors.
 - At 1x the GPU is ~94% busy. A Metal System Trace puts ~55 ms of every frame in one pass, the main
   1440x810 scene pass, mostly three of the game's material shaders. FXAA, the scaling filter and
   post-processing effects cost almost nothing.
@@ -172,7 +188,8 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 - `EDEN_NX2_LOG_FPS=1` (eden-cli) logs the frame rate and frame time every 5 s.
 - `EDEN_NX2_GPU_TIMING=2` labels render passes (`RP#n`) and dispatches for
   `xcrun xctrace record --template 'Metal System Trace'`; `=3` gives every draw its own pass.
-- `EDEN_NX2_IR_DUMP=<hash>,<dir>` writes a compute program's IR; `EDEN_NX2_NAN_SANITIZE=<hash>:<ops>`
+- `EDEN_NX2_IR_DUMP=<hash>,<dir>` writes a program's IR (graphics programs also as `.spv`; `all`
+  for every graphics program); `EDEN_NX2_NAN_SANITIZE=<hash>:<ops>`
   replaces NaN/infinite results of chosen IR operations with 0 (finding NaN sources).
 - `EDEN_NX2_FRAME_SKIP=<n>` draws one frame in n + 1 (a path instead of a number: the file holding
   n, re-read every 30 frames). `EDEN_NX2_FRAME_SKIP_WORK` (bits: 1 draws, 2 clears, 4 compute)

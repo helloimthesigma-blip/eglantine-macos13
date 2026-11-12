@@ -1773,6 +1773,7 @@ private:
             return value == nullptr                 ? -1
                    : std::string_view{value} == "auto" ? -2
                    : value[0] == '1'                ? 1
+                   : value[0] == '2'                ? 2
                                                     : 0;
         }();
         // Donkey Kong Bananza's channels wait on each other every frame, so it always ran a frame
@@ -1790,6 +1791,12 @@ private:
         if (frames_ahead_setting == -1 && (app_program_id == DonkeyKongBananzaProgramId ||
                                            app_program_id == OcarinaOfTimeProgramId)) {
             frames_ahead = 0;
+        }
+        // 2: frame skip's running ahead. Not Ocarina of Time: its drawn frames rendered with the
+        // next frame's data, and with frame skip they were the only frames shown, so the 3D
+        // picture stayed black or overexposed instead of flashing for one frame.
+        if (frames_ahead_setting == 2) {
+            frames_ahead = app_program_id == OcarinaOfTimeProgramId ? 0 : 1;
         }
         const auto entered = std::chrono::steady_clock::now();
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {

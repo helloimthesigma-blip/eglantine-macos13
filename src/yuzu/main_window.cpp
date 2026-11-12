@@ -3,7 +3,6 @@
 
 // Static Qt on macOS doesn't use Vulkan
 // Other platforms do, and thus have conflicting VulkanMemoryAllocator symbols
-#include "core/hle/service/nx2_oot_time.h"
 #include "core/launch_params.h"
 #if defined(QT_STATICPLUGIN) && !defined(__APPLE__)
 #undef VMA_IMPLEMENTATION
@@ -182,6 +181,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 // Video Core //
 #include "video_core/gpu.h"
 #include "core/core.h"
+#include "core/hle/service/nx2_oot_time.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -1711,10 +1711,36 @@ void MainWindow::ConnectMenuEvents() {
                 action->setToolTip(
                     tr("The game keeps running at full rate while the GPU draws only some frames: "
                        "a slowed-down game gets closer to normal speed, with a choppier picture. "
-                       "Also runs a frame ahead. Takes effect immediately."));
+                       "Also runs a frame ahead (not in Ocarina of Time, where that shows the 3D "
+                       "picture black or white). Takes effect immediately."));
                 frame_skip_group->addAction(action);
                 connect(action, &QAction::triggered, this, [frames] {
                     UISettings::values.nx2_frame_skip.SetValue(frames);
+                    ApplySpeedOptions();
+                });
+            }
+            // Ocarina of Time follows real time by stepping each frame by the time it took; the
+            // step is capped, and below 60 / cap fps the game slows down. Bigger steps keep full
+            // speed on a slower GPU (walking and collisions checked up to 12).
+            auto* oot_menu = options->addMenu(tr("Ocarina of Time Speed"));
+            oot_menu->setToolTipsVisible(true);
+            auto* oot_group = new QActionGroup(this);
+            const std::array<std::pair<u32, QString>, 3> oot_choices{{
+                {4, tr("Normal (full speed down to 15 FPS)")},
+                {8, tr("Faster (full speed down to 7.5 FPS)")},
+                {12, tr("Full speed down to 5 FPS (experimental)")},
+            }};
+            for (const auto& [step, label] : oot_choices) {
+                auto* action = oot_menu->addAction(label);
+                action->setCheckable(true);
+                action->setChecked(UISettings::values.nx2_oot_max_step.GetValue() == step);
+                action->setToolTip(
+                    tr("Below this frame rate the game runs in slow motion. Higher settings keep "
+                       "it at normal speed on a slower GPU by moving it further each frame; very "
+                       "big steps may make fast action less reliable. Takes effect immediately."));
+                oot_group->addAction(action);
+                connect(action, &QAction::triggered, this, [step] {
+                    UISettings::values.nx2_oot_max_step.SetValue(step);
                     ApplySpeedOptions();
                 });
             }
@@ -2087,13 +2113,20 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 namespace {
 // The "Run a Frame Ahead" and "Frame Skip" options, as the overrides the Switch 2 present and the
-// GPU thread read every frame (so a change applies at once). Frame skip implies running ahead:
-// skipped frames are cheap, and waiting for each one would waste most of the gain.
+// GPU thread read every frame (so a change applies at once). Frame skip implies running ahead
+// (skipped frames are cheap, and waiting for each one would waste most of the gain), except in
+// titles that render wrong a frame ahead.
 void ApplySpeedOptions() {
+    Service::Nx2OotTime::g_max_step_override.store(
+        static_cast<float>(UISettings::values.nx2_oot_max_step.GetValue()));
     const u32 frame_skip = UISettings::values.nx2_frame_skip.GetValue();
     Tegra::Nx2SetFrameSkip(static_cast<int>(frame_skip));
-    if (UISettings::values.nx2_frames_ahead.GetValue() || frame_skip != 0) {
+    if (UISettings::values.nx2_frames_ahead.GetValue()) {
         Core::g_nx2_frames_ahead_override.store(1);
+    } else if (frame_skip != 0) {
+        // Not for Ocarina of Time: a frame ahead, its drawn frames read the next frame's data,
+        // and with frame skip those were the only frames shown (black or white 3D picture).
+        Core::g_nx2_frames_ahead_override.store(2);
     } else {
         // Unset: EDEN_NX2_FRAMES_AHEAD, or each title's default.
         Core::g_nx2_frames_ahead_override.store(-1);

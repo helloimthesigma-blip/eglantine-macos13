@@ -38,6 +38,9 @@ inline constexpr u32 HookInstruction = 0x14D57D48; // b 0x3c461e4
 inline std::atomic<u64> g_delta_milli_total{0};
 inline std::atomic<u64> g_delta_count{0};
 
+/// The largest step as set in the app (Options -> Ocarina of Time Speed); 0 = unset.
+inline std::atomic<float> g_max_step_override{0.0f};
+
 /// The game's delta (1.0 = one 60th of a second) for the frame that follows a present.
 class FrameDelta {
 public:
@@ -47,12 +50,27 @@ public:
         if (last != Clock::time_point{}) {
             // A pause or a shader stall isn't time the game should catch up on.
             const float seconds = std::chrono::duration<float>(now - last).count();
-            average_seconds += ((std::min)(seconds, MaxFrameSeconds) - average_seconds) * Smoothing;
+            const float max_seconds = (std::max)(MaxFrameSeconds, MaxStep() / 60.0f * 1.5f);
+            average_seconds += ((std::min)(seconds, max_seconds) - average_seconds) * Smoothing;
         }
         last = now;
-        const float delta = std::clamp(average_seconds * 60.0f, 1.0f, MaxDelta);
+        const float delta = std::clamp(average_seconds * 60.0f, 1.0f, MaxStep());
         // Near 60 fps, keep the game's own fixed step instead of following timing jitter.
         return delta < SnapBelow ? 1.0f : delta;
+    }
+
+    /// The largest step (EDEN_NX2_OOT_MAX_DELTA, default 4): below 60 / that fps the game slows
+    /// down instead of taking bigger steps.
+    [[nodiscard]] static float MaxStep() {
+        if (const float app = g_max_step_override.load(std::memory_order_relaxed); app >= 1.0f) {
+            return (std::min)(app, 30.0f);
+        }
+        static const float max_step = [] {
+            const char* value = std::getenv("EDEN_NX2_OOT_MAX_DELTA");
+            const float parsed = value != nullptr ? std::strtof(value, nullptr) : 0.0f;
+            return parsed >= 1.0f ? (std::min)(parsed, 30.0f) : MaxDelta;
+        }();
+        return max_step;
     }
 
 private:
