@@ -1516,6 +1516,20 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
         device.SaveShader(code);
         modules[stage_index] = BuildShader(device, code);
+        // EDEN_NX2_IR_DUMP=<hash>,<dir> also takes graphics programs: <dir>/<hash>.ir and .spv.
+        if (const char* ir_dump = std::getenv("EDEN_NX2_IR_DUMP")) {
+            const std::string_view spec{ir_dump};
+            const auto comma = spec.find(',');
+            const std::string hash_text = fmt::format("{:016x}", key.unique_hashes[index]);
+            if (comma != std::string_view::npos &&
+                (spec.substr(0, comma) == hash_text || spec.substr(0, comma) == "all")) {
+                const std::string base = std::string{spec.substr(comma + 1)} + "/" + hash_text;
+                std::ofstream{base + ".ir"} << Shader::IR::DumpProgram(program);
+                std::ofstream spv{base + ".spv", std::ios::binary};
+                spv.write(reinterpret_cast<const char*>(code.data()),
+                          static_cast<std::streamsize>(code.size() * sizeof(u32)));
+            }
+        }
 
         // Text log + .spv dump. Text log is gated by gpu_log_level != Off; .spv dump
         // is independent and gated only by gpu_log_shader_dumps.
