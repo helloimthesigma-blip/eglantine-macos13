@@ -80,10 +80,13 @@ the game's Add-Ons ("Real-time speed (built-in)") or with `EDEN_NX2_OOT_REAL_TIM
 Max Resolution patch is not included: on a slow GPU the game's dynamic resolution helps.
 
 **Options → Ocarina of Time Speed** sets the largest step one frame may take: Normal (4/60 s, full
-speed down to 15 fps; below that the game slows down), Faster (8/60 s, down to 7.5 fps) or Full
-speed down to 5 fps (12/60 s, experimental). Walking, the camera, ladders and running into a tree
-were checked at 6, 8 and 12; fast action (combat, long jumps) has not been. `EDEN_NX2_OOT_MAX_DELTA`
-does the same for `eden-cli`.
+speed down to 15 fps; below that the game slows down), Faster (8/60 s, down to 7.5 fps), Full
+speed down to 5 fps (12/60 s) or down to 4 fps (15/60 s); the last two are experimental. Walking,
+the camera, ladders and running into a tree were checked at 6, 8 and 12, and walking, swimming and
+climbing at 15; fast action (combat, long jumps) has not been. `EDEN_NX2_OOT_MAX_DELTA` does the
+same for `eden-cli`. The step follows a smoothed frame time; a frame under half the average (the
+first after a load) pulls it down at once, so the game doesn't run up to twice full speed for a
+second after each load.
 
 Ocarina of Time a frame ahead renders each frame with data the game already wrote for the next
 one (one-frame white or overexposed flashes). With frame skip those frames were the only ones shown,
@@ -110,7 +113,10 @@ full speed):
 | Draw every 3rd frame | ~10.5 | ~3.5 | ~41 (68%) |
 | OoT Speed: full speed down to 5 fps | ~5.5 | ~5.5 | ~60 (100%) |
 
-In the app (docked, 0.5x) the last one showed "Game speed: 80-100%" at 4-5 fps.
+In the app (docked, 0.5x) frames take 210-240 ms: full speed down to 5 fps showed "Game speed:
+80-100%", down to 4 fps 100% in five of six readings. Docked 0.75x took ~280 ms and 1x ~340 ms
+(60%). At 0.75x (docked and handheld) the 3D picture is covered in coloured speckle noise; 0.5x and
+1x are clean. A lighter strip runs down the right edge of the 3D picture (about 3% of its width).
 
 The GPU is the limit: ~93% busy during gameplay. Frame time barely follows the resolution (0.25x
 ~157 ms, 0.5x ~180 ms, 1x ~235 ms): most of it is per-draw and geometry work (about 11,400 draws a
@@ -201,6 +207,9 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 - `EDEN_NX2_PENDING_ACQUIRE=1` lets a semaphore acquire on the GPU thread pass on a release already
   queued to the host GPU instead of waiting for it. Experimental: in OoT the game corrupted its
   memory with it (as with GPU accuracy Low), so it is off.
+- `EDEN_NX2_THREAD_DUMP=1` (`eden-cli`, with `EDEN_NX2_LOG_FPS`) logs every guest thread's state,
+  wait reason, registers and frame-pointer backtrace once no frame has been presented for 15 s
+  (from 40 s after boot); `=a` also dumps 45 s after boot, to compare with a good boot.
 - `EDEN_NX2_FRAME_SKIP_MIN_DRAWS=<n>` (300) is the draws a frame needs to count as busy.
   Skipped frames still run draws into colour targets of at least 256x256 that none of the last
   four drawn frames used (HUD, minimap and dialog layers redrawn only when they change;

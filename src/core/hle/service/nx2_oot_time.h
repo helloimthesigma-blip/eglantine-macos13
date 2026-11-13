@@ -51,7 +51,12 @@ public:
             // A pause or a shader stall isn't time the game should catch up on.
             const float seconds = std::chrono::duration<float>(now - last).count();
             const float max_seconds = (std::max)(MaxFrameSeconds, MaxStep() / 60.0f * 1.5f);
-            average_seconds += ((std::min)(seconds, max_seconds) - average_seconds) * Smoothing;
+            // Much faster frames are followed at once: after a stall (a load) the slow average
+            // would otherwise keep the large step for a second of fast frames (up to twice full
+            // speed). Ordinary jitter keeps the even smoothing, so the average isn't biased low.
+            const float clamped = (std::min)(seconds, max_seconds);
+            average_seconds += (clamped - average_seconds) *
+                               (clamped < average_seconds * 0.5f ? SmoothingFaster : Smoothing);
         }
         last = now;
         const float delta = std::clamp(average_seconds * 60.0f, 1.0f, MaxStep());
@@ -76,6 +81,7 @@ public:
 private:
     static constexpr float MaxFrameSeconds = 0.1f;
     static constexpr float Smoothing = 0.125f;
+    static constexpr float SmoothingFaster = 0.5f;
     static constexpr float MaxDelta = 4.0f;
     static constexpr float SnapBelow = 1.1f;
 

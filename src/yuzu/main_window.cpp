@@ -1721,14 +1721,15 @@ void MainWindow::ConnectMenuEvents() {
             }
             // Ocarina of Time follows real time by stepping each frame by the time it took; the
             // step is capped, and below 60 / cap fps the game slows down. Bigger steps keep full
-            // speed on a slower GPU (walking and collisions checked up to 12).
+            // speed on a slower GPU (walking, climbing and swimming checked up to 15).
             auto* oot_menu = options->addMenu(tr("Ocarina of Time Speed"));
             oot_menu->setToolTipsVisible(true);
             auto* oot_group = new QActionGroup(this);
-            const std::array<std::pair<u32, QString>, 3> oot_choices{{
+            const std::array<std::pair<u32, QString>, 4> oot_choices{{
                 {4, tr("Normal (full speed down to 15 FPS)")},
                 {8, tr("Faster (full speed down to 7.5 FPS)")},
                 {12, tr("Full speed down to 5 FPS (experimental)")},
+                {15, tr("Full speed down to 4 FPS (experimental)")},
             }};
             for (const auto& [step, label] : oot_choices) {
                 auto* action = oot_menu->addAction(label);

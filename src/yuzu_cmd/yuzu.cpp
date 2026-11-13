@@ -756,6 +756,47 @@ static void LogFrameRate(Core::System& system) {
         LOG_INFO(Frontend, "Guest threads by CPU time (total {} ticks){}", total, text);
     }
     const auto results = system.GetAndResetPerfStats();
+    // EDEN_NX2_THREAD_DUMP=1: when no frame is presented for 15 s (40 s after boot), log each
+    // guest thread's state, wait reason, registers and frame-pointer backtrace once (debug: finds
+    // what a hung boot waits on; =a also dumps 45 s after boot, for comparing with a good boot).
+    static const char* const thread_dump = std::getenv("EDEN_NX2_THREAD_DUMP");
+    if (thread_dump != nullptr && system.ApplicationProcess() != nullptr) {
+        static int logs = 0, zero_streak = 0;
+        static bool dumped = false;
+        ++logs;
+        zero_streak = results.average_game_fps == 0.0 ? zero_streak + 1 : 0;
+        if ((!dumped && logs >= 8 && zero_streak >= 3) || (thread_dump[0] == 'a' && logs == 9)) {
+            dumped = dumped || zero_streak >= 3;
+            auto& memory = system.ApplicationMemory();
+            const auto* process = system.ApplicationProcess();
+            LOG_INFO(Frontend, "Thread dump: code {:#x}-{:#x}",
+                     GetInteger(process->GetPageTable().GetCodeRegionStart()),
+                     GetInteger(process->GetPageTable().GetCodeRegionStart()) + process->GetPageTable().GetCodeRegionSize());
+            for (auto& thread : system.ApplicationProcess()->GetThreadList()) {
+                const auto& context = thread.GetContext();
+                std::string trace;
+                u64 fp = context.fp;
+                for (int depth = 0; depth < 12 && fp != 0 && (fp & 7) == 0 &&
+                                    memory.IsValidVirtualAddressRange(fp, 16);
+                     ++depth) {
+                    trace += fmt::format(" {:#x}", memory.Read64(fp + 8));
+                    const u64 next = memory.Read64(fp);
+                    if (next <= fp) {
+                        break;
+                    }
+                    fp = next;
+                }
+                LOG_INFO(Frontend,
+                         "Thread #{} p{} state {} wait {} pc {:#x} lr {:#x} x0 {:#x} x1 {:#x} "
+                         "x2 {:#x} x3 {:#x} x8 {:#x} trace{}",
+                         thread.GetThreadId(), thread.GetPriority(),
+                         static_cast<u32>(thread.GetState()),
+                         static_cast<u32>(thread.GetWaitReasonForDebugging()), context.pc,
+                         context.lr, context.r[0], context.r[1], context.r[2], context.r[3],
+                         context.r[8], trace);
+            }
+        }
+    }
     // Ocarina of Time's real-time patch: its game time per frame, so the game's speed (1.0 = full)
     // is fps * average delta / 60.
     static u64 last_delta_total = 0, last_delta_count = 0;
