@@ -1040,7 +1040,7 @@ void TryTransformSwizzleIfNeeded(PixelFormat format, std::array<SwizzleSource, 4
 
 void BlitScale(Scheduler& scheduler, VkImage src_image, VkImage dst_image, const ImageInfo& info,
                VkImageAspectFlags aspect_mask, const Settings::ResolutionScalingInfo& resolution,
-               bool up_scaling = true) {
+               bool up_scaling = true, bool force_nearest = false) {
     const bool is_2d = info.type == ImageType::e2D;
     const auto resources = info.resources;
     const VkExtent2D extent{
@@ -1049,7 +1049,7 @@ void BlitScale(Scheduler& scheduler, VkImage src_image, VkImage dst_image, const
     };
     // Depth and integer formats must use NEAREST filter for blits.
     const bool is_color{aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT};
-    const bool is_bilinear{is_color && !IsPixelFormatInteger(info.format)};
+    const bool is_bilinear{is_color && !IsPixelFormatInteger(info.format) && !force_nearest};
     const VkFilter vk_filter = is_bilinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
 
     scheduler.RequestOutsideRenderPassOperationContext();
@@ -3805,7 +3805,8 @@ bool Image::ScaleUp(bool ignore) {
             return false;
         }
     } else {
-        BlitScale(*scheduler, *original_image, *scaled_image, info, aspect_mask, resolution);
+        BlitScale(*scheduler, *original_image, *scaled_image, info, aspect_mask, resolution, true,
+                  HasIntegerAliasView());
     }
     return true;
 }
@@ -3834,16 +3835,31 @@ bool Image::ScaleDown(bool ignore) {
             return false;
         }
     } else {
-        BlitScale(*scheduler, *scaled_image, *original_image, info, aspect_mask, resolution, false);
+        BlitScale(*scheduler, *scaled_image, *original_image, info, aspect_mask, resolution, false,
+                  HasIntegerAliasView());
     }
     return true;
+}
+
+bool Image::HasIntegerAliasView() const {
+    // OOT's sharpening writes its colour images through R32_UINT views (packed B10G11R11 and
+    // A8B8G8R8 words), and they are scaled down for that dispatch and up again after it every
+    // frame. Filtering packed words mixes their bytes: at 0.75x, where the samples fall between
+    // texels, the picture was covered in coloured noise. Such images are copied unfiltered.
+    if (IsPixelFormatInteger(info.format)) {
+        return false;
+    }
+    return std::ranges::any_of(image_view_infos, [](const VideoCommon::ImageViewInfo& view) {
+        return IsPixelFormatInteger(view.format);
+    });
 }
 
 bool Image::BlitScaleHelper(bool scale_up) {
     using namespace VideoCommon;
     static constexpr auto BLIT_OPERATION = Tegra::Engines::Fermi2D::Operation::SrcCopy;
     const bool is_color{aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT};
-    const bool is_bilinear{is_color && !IsPixelFormatInteger(info.format)};
+    const bool is_bilinear{is_color && !IsPixelFormatInteger(info.format) &&
+                           !HasIntegerAliasView()};
     const auto operation = is_bilinear ? Tegra::Engines::Fermi2D::Filter::Bilinear
                                        : Tegra::Engines::Fermi2D::Filter::Point;
 

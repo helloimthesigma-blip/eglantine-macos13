@@ -1094,7 +1094,39 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     bool is_dst_rescaled = True(dst_image.flags & ImageFlagBits::Rescaled);
 
     const bool is_resolve = src_image.info.num_samples != 1 && dst_image.info.num_samples == 1;
-    if (is_src_rescaled != is_dst_rescaled) {
+    // A blit from a full-size source into a rescaled destination can read the source at full
+    // size (only the destination region is scaled). Scaling the source down first threw away
+    // detail:
+    // OOT's own upscaler writes its full-size output with compute (never rescaled) and blits it
+    // into the rescaled frame, which at 0.75x went 1440x810 -> 1080x607 -> 1440x810.
+    // EDEN_NX2_BLIT_KEEP_SRC=0 scales the source as before.
+    static const bool keep_src = [] {
+        const char* value = std::getenv("EDEN_NX2_BLIT_KEEP_SRC");
+        return value == nullptr || value[0] != '0';
+    }();
+    static const bool log_blits = std::getenv("EDEN_NX2_LOG_BLITS") != nullptr;
+    if (is_src_rescaled != is_dst_rescaled && log_blits) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 200) {
+            LOG_INFO(HW_GPU, "Mixed-scale blit: src {:#x} {}x{} fmt {} rescaled {} -> dst {:#x} {}x{} fmt {} rescaled {}, region {}x{} -> {}x{}",
+                     src_image.gpu_addr, src_image.info.size.width, src_image.info.size.height,
+                     static_cast<u32>(src_image.info.format), is_src_rescaled, dst_image.gpu_addr,
+                     dst_image.info.size.width, dst_image.info.size.height,
+                     static_cast<u32>(dst_image.info.format), is_dst_rescaled,
+                     copy.src_x1 - copy.src_x0, copy.src_y1 - copy.src_y0,
+                     copy.dst_x1 - copy.dst_x0, copy.dst_y1 - copy.dst_y0);
+        }
+    }
+    // Only copies that land 1:1 (handheld 0.75x: 1440x810 into the 1920x1080 frame scaled to
+    // 1440x810). Shrinking the source in the blit instead (docked: 1920x1080 into 1280x720)
+    // tinted the docked picture a different colour every frame.
+    const auto& scale_info = Settings::values.resolution_info;
+    const bool kept_src =
+        keep_src && !is_resolve && !is_src_rescaled && is_dst_rescaled &&
+        scale_info.ScaleUp(copy.dst_x1 - copy.dst_x0) == copy.src_x1 - copy.src_x0 &&
+        scale_info.ScaleUp(copy.dst_y1 - copy.dst_y0) == copy.src_y1 - copy.src_y0;
+    const auto filter = copy.filter;
+    if (is_src_rescaled != is_dst_rescaled && !kept_src) {
         if (ImageCanRescale(src_image)) {
             ScaleUp(src_image);
             is_src_rescaled = True(src_image.flags & ImageFlagBits::Rescaled);
@@ -1173,7 +1205,7 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
         // Provide a framebuffer in case it's necessary
         ImageView& dst_view = slot_image_views[dst_view_id];
         ImageView& src_view = slot_image_views[src_view_id];
-        runtime.BlitImage(dst_framebuffer, dst_view, src_view, dst_region, src_region, copy.filter,
+        runtime.BlitImage(dst_framebuffer, dst_view, src_view, dst_region, src_region, filter,
                           copy.operation);
     }
     return true;

@@ -288,11 +288,15 @@ bool DmaPusher::Step() {
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
+            if (gpu_written) {
+                Nx2LogGpuList(header, commands);
+            }
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else if (ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
             RecordParsedEntry(header, commands);
+            Nx2LogGpuList(header, commands);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else {
@@ -821,6 +825,24 @@ void DmaPusher::CheckSubmitHash(const CommandListHeader& header, u64 submit_hash
         LOG_WARNING(HW_GPU, "pushbuffer check: {} of {} entries changed after submit",
                     changed.load(), checked.load());
     }
+}
+
+void DmaPusher::Nx2LogGpuList(const CommandListHeader& header,
+                              std::span<const CommandHeader> commands) {
+    // EDEN_NX2_LOG_GPU_LISTS=1: the words of command lists GPU work wrote (first 400).
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_LOG_GPU_LISTS");
+        return value != nullptr && value[0] == '1';
+    }();
+    static std::atomic<u32> logged{};
+    if (!enabled || logged.fetch_add(1) >= 400) {
+        return;
+    }
+    std::string words;
+    for (size_t i = 0; i < commands.size() && i < 16; ++i) {
+        words += fmt::format(" {:08x}", commands[i].argument);
+    }
+    LOG_INFO(HW_GPU, "GPU-written list {:#x}+{:#x}:{}", u64{header.addr}, u64{header.size}, words);
 }
 
 void DmaPusher::RecordParsedEntry(const CommandListHeader& header,

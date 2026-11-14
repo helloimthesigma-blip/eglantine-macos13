@@ -89,6 +89,7 @@ public:
         return pending_acquire.has_value();
     }
     [[nodiscard]] bool CanResumeAcquire(DmaPusher& dma_pusher);
+    void Nx2AcquireStats(DmaPusher& dma_pusher, const PendingAcquire& acquire);
     /// Clears the pending acquire once it is met; false while the channel has to keep waiting.
     bool ResumeAcquire(DmaPusher& dma_pusher);
 

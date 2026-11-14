@@ -520,6 +520,9 @@ public:
 private:
     bool BlitScaleHelper(bool scale_up);
 
+    /// A view of it has an integer format while it has not (packed data): scale unfiltered.
+    [[nodiscard]] bool HasIntegerAliasView() const;
+
     bool NeedsScaleHelper() const;
 
     Scheduler* scheduler{};

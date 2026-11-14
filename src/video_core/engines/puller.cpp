@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <map>
+#include <mutex>
 #include <atomic>
 #include <cstdlib>
 
@@ -146,7 +148,16 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (const auto now = std::chrono::steady_clock::now();
         delayed && now - pending_acquire->last_fences >= std::chrono::milliseconds{1}) {
         pending_acquire->last_fences = now;
-        ReleaseFences(dma_pusher);
+        // Waiting for the host GPU here (every millisecond while suspended, and after every
+        // command list another channel submits) kept the GPU thread from recording while the GPU
+        // ran: OOT's channels wait on each other's releases ~45 times a second, and the GPU idled
+        // ~40% of the time. The asynchronous acquire only submits: the fence thread writes the
+        // releases as the GPU gets there, and the poll sees them latched.
+        if (AsyncAcquire()) {
+            SubmitPendingFences(dma_pusher);
+        } else {
+            ReleaseFences(dma_pusher);
+        }
         if (Nx2SemaphoreWaiters::Get().Latched(this) ||
             pending_acquire->Matches(ReadSemaphoreWord(dma_pusher, pending_acquire->address))) {
             return true;
@@ -169,6 +180,53 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     return false;
 }
 
+void Puller::Nx2AcquireStats(DmaPusher& dma_pusher, const PendingAcquire& acquire) {
+    // EDEN_NX2_ACQUIRE_STATS=1: per semaphore, the suspended acquires, their total wait and how
+    // they were met (latched by a GPU release, or the word read), every 10 s.
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_ACQUIRE_STATS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    struct Entry {
+        u64 count = 0;
+        double ms = 0;
+        double max_ms = 0;
+        u64 latched = 0;
+        u32 op = 0;
+        u32 last_value = 0;
+    };
+    static std::mutex mutex;
+    static std::map<GPUVAddr, Entry> entries;
+    static auto last_report = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - acquire.since).count();
+    const bool latched = Nx2SemaphoreWaiters::Get().Latched(this);
+    std::scoped_lock lk{mutex};
+    Entry& e = entries[acquire.address];
+    ++e.count;
+    e.ms += ms;
+    e.max_ms = (std::max)(e.max_ms, ms);
+    e.latched += latched ? 1 : 0;
+    e.op = acquire.operation;
+    e.last_value = acquire.value;
+    if (now - last_report >= std::chrono::seconds{10}) {
+        const double span = std::chrono::duration<double>(now - last_report).count();
+        last_report = now;
+        for (const auto& [address, entry] : entries) {
+            LOG_INFO(HW_GPU, "Acquire stats: channel {} semaphore {:#x} (device {:#x}) op {}: {:.1f}/s, "
+                     "wait {:.1f} ms/s (max {:.1f} ms), {} latched, last value {:#x}",
+                     dma_pusher.channel_state.bind_id, address,
+                     dma_pusher.memory_manager.GpuToCpuAddress(address).value_or(0), entry.op,
+                     entry.count / span, entry.ms / span, entry.max_ms, entry.latched,
+                     entry.last_value);
+        }
+        entries.clear();
+    }
+}
+
 bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
     if (!CanResumeAcquire(dma_pusher)) {
         return false;
@@ -177,6 +235,7 @@ bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
     // counting those made the count odd ("suspended") at random, so submit-time snapshots were
     // thrown away for about half of all entries (CommandList::snapshot_suspensions).
     if (pending_acquire) {
+        Nx2AcquireStats(dma_pusher, *pending_acquire);
         pending_acquire.reset();
         dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
         Nx2SemaphoreWaiters::Get().Remove(this);
@@ -316,7 +375,9 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         // Met by a release already queued to the host GPU (see Nx2PendingReleases): no wait.
         if (Nx2PendingReleases::Enabled()) {
             if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address)) {
-                if (const auto value = Nx2PendingReleases::Get().Pending(*device);
+                if (const auto value = Nx2PendingReleases::Allowed(*device)
+                                           ? Nx2PendingReleases::Get().Pending(*device)
+                                           : std::nullopt;
                     value && acquire.Matches(*value)) {
                     return;
                 }
@@ -338,6 +399,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
         } else {
+            Nx2AcquireStats(dma_pusher, acquire);
             waiters.Remove(this);
         }
     } else {

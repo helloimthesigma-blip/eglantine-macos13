@@ -115,14 +115,21 @@ full speed):
 
 In the app (docked, 0.5x) frames take 210-240 ms: full speed down to 5 fps showed "Game speed:
 80-100%", down to 4 fps 100% in five of six readings. Docked 0.75x took ~280 ms and 1x ~340 ms
-(60%). At 0.75x (docked and handheld) the 3D picture is covered in coloured speckle noise; 0.5x and
-1x are clean. A lighter strip runs down the right edge of the 3D picture (about 3% of its width).
+(60%). Handheld 0.75x takes ~200-210 ms (the game does less work handheld than docked), about the
+same as docked 0.5x, with a 1080x607 scene and a full 1440x810 frame instead of 960x540. The
+coloured speckle noise that covered 0.75x is fixed (see below). A lighter strip runs down the right edge of the 3D picture (about 3% of its width).
 
 The GPU is the limit: ~93% busy during gameplay. Frame time barely follows the resolution (0.25x
 ~157 ms, 0.5x ~180 ms, 1x ~235 ms): most of it is per-draw and geometry work (about 11,400 draws a
 frame, 9,300 of them with one simple position-only vertex program) plus one lighting pass whose
 fragment program reads memory through ~112 global-memory lookups per pixel (~16 ms, not scaled by
 the resolution setting).
+
+Measured without gain (Nov 2026): GPU fence behaviour Immediate or Balanced; the asynchronous acquire
+submitting instead of waiting while suspended; polling the timeline semaphore instead of sleeping;
+skipping the waits for GPU-written command lists altogether (wrong, ~5%). The GPU thread waits
+mostly on other channels' semaphore releases and on the command lists the game's culling writes,
+which are real dependencies.
 
 Upstream's hot-page and GPU translation cache commits (f27522bfb9, b1e650849e) were tried and
 reverted: no measurable gain on the M1, and 2 of 13 boots with them went bad (a GPU hang on a
@@ -157,6 +164,8 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 | `eden-cli` could not find MoltenVK | Look next to the executable and in a sibling `eglantine.app` |
 | AV1 movies black (title background, intro) | FFmpeg with dav1d (`tools/macos13/build-ffmpeg-av1.sh`) |
 | Metal validation: uniform bound near the end of the stream buffer could read past it | Pad the stream buffer by 64 KiB |
+| Coloured speckle noise over the 3D picture at 0.75x | OOT's own upscaler writes its images through R32_UINT views, and they are scaled down for that compute pass and up again every frame. The bilinear scale blits mixed the bytes of the packed words wherever samples fell between texels (0.75x, not 0.5x). Images with an integer view are scaled unfiltered |
+| The upscaler's full 1440x810 output (handheld) was shrunk to the scaled size and stretched back | A 2D blit from a full-size source into a rescaled destination that lands 1:1 reads the source directly (`EDEN_NX2_BLIT_KEEP_SRC=0` restores the old path). Not when the blit would shrink it: docked, 1920x1080 into 1280x720, that tinted the picture |
 | Blending enabled on integer render targets | Leave blending off there (Vulkan ignores it; Metal does not) |
 | Device lost (`Internal Error 00000106`) in the first 3D scene | Clamp framebuffer size to `maxFramebufferWidth/Height`: attachment-less passes were sized 32768x32768 from the guest's surface clip |
 | Null texture fallback had 2D views for every texture type (on a 1D image) | One null image per dimension, and a view of each declared type |
@@ -207,6 +216,13 @@ M1 Pro, Max or Ultra and later chips should do proportionally better.
 - `EDEN_NX2_PENDING_ACQUIRE=1` lets a semaphore acquire on the GPU thread pass on a release already
   queued to the host GPU instead of waiting for it. Experimental: in OoT the game corrupted its
   memory with it (as with GPU accuracy Low), so it is off.
+- `EDEN_NX2_PENDING_ACQUIRE_ONLY=<device address>,...` limits the above to these semaphores.
+  `EDEN_NX2_ACQUIRE_STATS=1` logs, every 10 s, each semaphore the GPU thread waited on: waits per
+  second, time waited and whether a GPU release met it. In OoT the waits are releases from other
+  channels' later submissions (two semaphores, ~5 and ~17 a second), so passing on pending releases
+  does not apply; with all of them the boot hangs.
+- `EDEN_NX2_LOG_GPU_LISTS=1` logs the words of command lists GPU work wrote (OoT: 2-3 word entries,
+  mostly zeros). `EDEN_NX2_LOG_BLITS=1` logs 2D blits between rescaled and full-size images.
 - `EDEN_NX2_THREAD_DUMP=1` (`eden-cli`, with `EDEN_NX2_LOG_FPS`) logs every guest thread's state,
   wait reason, registers and frame-pointer backtrace once no frame has been presented for 15 s
   (from 40 s after boot); `=a` also dumps 45 s after boot, to compare with a good boot.

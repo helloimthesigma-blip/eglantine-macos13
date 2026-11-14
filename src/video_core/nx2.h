@@ -383,9 +383,34 @@ public:
     static bool Enabled() {
         static const bool enabled = [] {
             const char* value = std::getenv("EDEN_NX2_PENDING_ACQUIRE");
-            return value != nullptr && value[0] == '1';
+            return (value != nullptr && value[0] == '1') || !Only().empty();
         }();
         return enabled;
+    }
+
+    /// EDEN_NX2_PENDING_ACQUIRE_ONLY=<device address>,...: only acquires of these semaphores
+    /// pass on a pending release (empty: all, with EDEN_NX2_PENDING_ACQUIRE=1).
+    static const std::vector<u64>& Only() {
+        static const std::vector<u64> only = [] {
+            std::vector<u64> result;
+            const char* value = std::getenv("EDEN_NX2_PENDING_ACQUIRE_ONLY");
+            while (value != nullptr && *value != '\0') {
+                char* end = nullptr;
+                const u64 address = std::strtoull(value, &end, 16);
+                if (end == value) {
+                    break;
+                }
+                result.push_back(address);
+                value = *end == ',' ? end + 1 : end;
+            }
+            return result;
+        }();
+        return only;
+    }
+
+    static bool Allowed(u64 device_address) {
+        const auto& only = Only();
+        return only.empty() || std::ranges::find(only, device_address) != only.end();
     }
 
     void Record(u64 device_address, u32 value) {
